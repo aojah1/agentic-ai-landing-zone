@@ -30,3 +30,4 @@ client/ask_data/src/system_prompt/__pycache__/__init__.cpython-313.pyc
 client/ask_data/src/system_prompt/__pycache__/prompts.cpython-313.pyc
 client/ask_data/src/tools/__pycache__/__init__.cpython-313.pyc
 client/ask_data/src/tools/__pycache__/tool_rag.cpython-313.pyc
+mcp_server/mcp_redis/config/.env
