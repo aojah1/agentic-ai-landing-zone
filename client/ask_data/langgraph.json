@@ -1,0 +1,17 @@
+{
+  "graphs": {
+    "askdata_getinsights": "src/agent_teams/askdata_getinsights.py:askdata_getinsights"
+  },
+  "env": "src/config/.env",
+  "dependencies": ["."],
+  "mounts": [
+    {
+      "source": "~/.oci/config",
+      "target": "/home/app/.oci/config"
+    },
+    {
+      "source": "~/.oci/oci_api_key.pem",
+      "target": "/home/app/.oci/oci_api_key.pem"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+client/ai_ops/config/.env
+client/ai_ops/src/agents/__pycache__/db_operator.cpython-313.pyc
+client/ask_data/config/.env
