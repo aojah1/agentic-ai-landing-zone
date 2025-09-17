@@ -1,16 +1,9 @@
 ### =================================
-## ===  Oracle Database Operator  ===
+## ===  DB Operator  Agent ==========
 ### ==================================
 
-This agent integrates with Oracle DB SQLCl MCP Server, allowing NL conversation with any Oracle Database (19 c or higher).
-https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
-Workflow Overview:
-1. Load config and credentials from .env
-2. Start MCP clients for SQLCL
-3. Register tools with the agent
-4. Run the agent with user input and print response
-"""
-
+> The DB Operator Agent is based on the concept of Context Engineering. Here the agent is provided with a larger context to do 
+it's job. Context include knowledge about local file system to work with, ability to run pythin code on a scratchpad, a RAG based knoweldge about Oracle 23.AI DB, a web search engine, OCI operation, and finally take an action against Oracle DB.
 
 ![db_operator.png](/client/ai_ops/images/db_operator.png)
 
@@ -26,7 +19,7 @@ Workflow Overview:
 
 Follow the steps per this document to configure MCP Server for SQLcli: 
 
-    https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/preparing-your-environment.html
+    https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
 
 ### B) MCP DB_Tools: 
 
@@ -34,7 +27,7 @@ Follow the steps per this github repo:
 
     https://github.com/aojah1/agentic-ai-landing-zone/tree/main/mcp_server/dbtools-mcp-server
 
-### C) MCP WebSearch with Taavily: 
+### C) MCP WebSearch with Tavily: 
 
 Follow the steps per this website:
 
@@ -61,34 +54,13 @@ Follow the steps
 ## Step 7) Agent Evaluation
 
 # Configure your development environment
-> Fork the repository
-> https://github.com/aojah1/mcp
-> 
-> Clone the fork locally
-> 
-> git clone https://github.com/<your_user_name>/mcp.git
-
-### Optional commands
-    How to actually get Python 3.13 on macOS (change it for your machine)
-    Option 1 : Homebrew (simplest)
-    brew update
-    brew install python@3.13          # puts python3.13 in /opt/homebrew/bin
-    echo 'export PATH="/opt/homebrew/opt/python@3.13/bin:$PATH"' >> ~/.zshrc
-    exec $SHELL                       # reload shell so python3.13 is found
-    python3.13 --version              # → Python 3.13.x
-    
-    Option 2 : pyenv (lets you switch versions)
-    brew install pyenv
-    pyenv install 3.13.0
-    pyenv global 3.13.0
-    python --version                  # now 3.13.0
 
 ### Client Library
     cd mcp_client
 
 ### Configuring and running the agent
-    python3.13 -m venv .venv_mcp
-    source .venv_mcp/bin/activate
+    python3.13 -m venv .venv_mcp_client_aiops
+    source .venv_mcp_client_aiops/bin/activate
 
 ### Installing all the required packages
 
@@ -96,7 +68,7 @@ After you create a project and a virtual environment, install the latest version
 > python3.13 -m pip install -r requirements.txt
 
 ### Configuring your .env (config) file
-> Rename the mcp_client/config/sample_.env to mcp_client/config/.env
+> Rename the /config/sample_.env to /config/.env
 > 
 > Change the config variables based on your agents requirements
 
@@ -108,9 +80,7 @@ The server uses OCI's built-in authentication and authorization mechanisms, incl
 > Signer-based authentication for specific endpoints
 
 ### Build/Deploy an DB Operator Agent
-This agent integrates with Oracle DB SQLCl MCP Server, allowing NL conversation with any Oracle Database (19 c or higher).
 
-https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
 > python3.13 -m src.agents.db_operator
 > 
 ### Test DB Operator Agent
