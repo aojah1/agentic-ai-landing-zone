@@ -1,165 +1,134 @@
-# Redis MCP Server
-[![smithery badge](https://smithery.ai/badge/@redis/mcp-redis)](https://smithery.ai/server/@redis/mcp-redis)
+ASK DATA RUN BOOK V3.0 (Date : Sep/13/2025) - ANUP OJAH
 
-<a href="https://glama.ai/mcp/servers/@redis/mcp-redis">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@redis/mcp-redis/badge" alt="Redis Server MCP server" />
-</a>
+A) AGENT SETUP
+==============
 
-## Overview
-The Redis MCP Server is a **natural language interface** designed for agentic applications to efficiently manage and search data in Redis. It integrates seamlessly with **MCP (Model Content Protocol) clients**, enabling AI-driven workflows to interact with structured and unstructured data in Redis. Using this MCP Server, you can ask questions like:
+Step 1. MCP Redis Server Setup
+====================
+ssh -i ssh-key-mcp-agent.key opc@192.1.1.1
 
-- "Store the entire conversation in a stream"
-- "Cache this item"
-- "Store the session with an expiration time"
-- "Index and search this vector"
-
-## Features
-- **Natural Language Queries**: Enables AI agents to query and update Redis using natural language.
-- **Seamless MCP Integration**: Works with any **MCP client** for smooth communication.
-- **Full Redis Support**: Handles **hashes, lists, sets, sorted sets, streams**, and more.
-- **Search & Filtering**: Supports efficient data retrieval and searching in Redis.
-- **Scalable & Lightweight**: Designed for **high-performance** data operations.
-
-## Tools
-
-This MCP Server provides tools to manage the data stored in Redis.
-
-- `string` tools to set, get strings with expiration. Useful for storing simple configuration values, session data, or caching responses.
-- `hash` tools to store field-value pairs within a single key. The hash can store vector embeddings. Useful for representing objects with multiple attributes, user profiles, or product information where fields can be accessed individually.
-- `list` tools with common operations to append and pop items. Useful for queues, message brokers, or maintaining a list of most recent actions.
-- `set` tools to add, remove and list set members. Useful for tracking unique values like user IDs or tags, and for performing set operations like intersection.
-- `sorted set` tools to manage data for e.g. leaderboards, priority queues, or time-based analytics with score-based ordering.
-- `pub/sub` functionality to publish messages to channels and subscribe to receive them. Useful for real-time notifications, chat applications, or distributing updates to multiple clients.
-- `streams` tools to add, read, and delete from data streams. Useful for event sourcing, activity feeds, or sensor data logging with consumer groups support.
-- `JSON` tools to store, retrieve, and manipulate JSON documents in Redis. Useful for complex nested data structures, document databases, or configuration management with path-based access.
-
-Additional tools.
-
-- `query engine` tools to manage vector indexes and perform vector search
-- `server management` tool to retrieve information about the database
-
-## Installation
-
-Follow these instructions to install the server.
-
-```sh
-# Clone the repository
-git clone https://github.com/aojah1/mcp_redis.git
-cd mcp_redis
-
-# Optional commands
-How to actually get Python 3.13 on macOS (change it for your machine)
-    1 Homebrew (simplest)
-    bash
-    
-    Edit
-    brew update
-    brew install python@3.13          # puts python3.13 in /opt/homebrew/bin
-    echo 'export PATH="/opt/homebrew/opt/python@3.13/bin:$PATH"' >> ~/.zshrc
-    exec $SHELL                       # reload shell so python3.13 is found
-    python3.13 --version              # → Python 3.13.x
-    2 pyenv (lets you switch versions)
-    bash
-    
-    Edit
-    brew install pyenv
-    pyenv install 3.13.0
-    pyenv global 3.13.0
-    python --version                  # now 3.13.0
-
-# Install dependencies
-# Install MCP Server requirement
-python3.13 -m venv .venv
-source .venv/bin/activate
-python3.13 -m pip install -e .
-```
-# Install MCP Client requirement
-python3.13 -m venv .venv
-source .venv/bin/activate
+cd mcp_redis/mcp_server
+python3.13 -m venv .venv_redis_server
+source .venv_redis_server/bin/activate
 python3.13 -m pip install -r requirements.txt
 
-## Configuration
+nohup python3.13 main.py > mcp_server_8003.log 2>&1 &
 
-To configure this Redis MCP Server, consider the following environment variables:
-
-| Name                    | Description                                               | Default Value |
-|-------------------------|-----------------------------------------------------------|---------------|
-| `REDIS_HOST`            | Redis IP or hostname                                      | `"127.0.0.1"` |
-| `REDIS_PORT`            | Redis port                                                | `6379`        |
-| `REDIS_USERNAME`        | Default database username                                 | `"default"`   |
-| `REDIS_PWD`             | Default database password                                 | ""            |
-| `REDIS_SSL`             | Enables or disables SSL/TLS                               | `False`       |
-| `REDIS_CA_PATH`         | CA certificate for verifying server                       | None          |
-| `REDIS_SSL_KEYFILE`     | Client's private key file for client authentication       | None          |
-| `REDIS_SSL_CERTFILE`    | Client's certificate file for client authentication       | None          |
-| `REDIS_CERT_REQS`       | Whether the client should verify the server's certificate | `"required"`  |
-| `REDIS_CA_CERTS`        | Path to the trusted CA certificates file                  | None          |
-| `REDIS_CLUSTER_MODE`    | Enable Redis Cluster mode                                 | `False`       |
+Note: This will start the MCP Server with http streamable protocol. 
 
 
-Configure to use OCI GenAI Service as a next step:
-Used Cohere Model for ReAct
-
-```configure ~/.oci/config
-https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdkconfig.htm
-```
-Use OCI Resource Principle for production
-
-And run the [application](mcp_client/redis_langchain.py).
-
-```commandline
-python3.13 mcp_client/redis_langchain.py
-```
-### To Test the Graph in Dev/Local run the following, you will get an IP/Port that can be used to connect from a lagraph client
-
-langgraph dev --config langgraph.json --allow-blocking
-
-### To Run the graph using SSE transport - this will open an hhtp:port for the MCP client to listen in
-python3.13 mcp_server/main.py
-The endpoint http://localhost:8000/sse?server=redis is reachable via curl.
-curl -N http://localhost:8000/sse?server=redis
-If it says "Not Found" or connection refused, the server isn’t running correctly.
-
-** on another terminal run - 
-python3.13 -m mcp_client.app.getinsight.askdata_getinsights
-
-### NOTE:
-There is an issue with the MCP Versions, both the server and the client has 2 different version. Here is the fix -
-In MCP_Client .env ==> use this ==> MCP_TRANSPORT=“streamable_http”
-In MCP_Server .env ==> use this ==> MCP_TRANSPORT=“streamable-http” 
-
-###  Run a streamilt app to execute the agent
-
- python3.13 -m app.getinsights.askdata_getinsights
-
-### Run FastAPI
-
-python3.13 -m uvicorn src.app.getinsights.api_getinsights:app --reload --host 0.0.0.0 --port 8083
 
 
-### Using with Docker
+Step 2. MCP Agent/Client Setup
+===========================
+ssh -i ssh-key-mcp-agent.key opc@192.1.1.2
 
-You can use a dockerized deployment of this server. You can either build your own image or use the official [Redis MCP Docker](https://hub.docker.com/r/mcp/redis) image.
+cd mcp_redis/mcp_server
+python3.13 -m venv .venv_agent_client
+source .venv_agent_client/bin/activate
+python3.13 -m pip install -r requirements.txt
 
-If you'd like to build your own image, the Redis MCP Server provides a Dockerfile. Build this server's image with:
+#### Run Few Test Cases to ensure MCP Client and MCP Server are able to communicate with the REDIS as a backend DB#### 
 
-```commandline
-docker build -t mcp_redis .
-```
-pip install redis_server
-redis-server --dir ~/redis-data --dbfilename dump.rdb
+python3.13 -m app.getinsights.askdata_getinsights
+
+Note: This will start an interactive session, that you can use to start interactinng with the REDIS MCP Server.
 
 
-### Troubleshooting
 
-You can troubleshoot problems by tailing the log file.
 
-```commandline
-tail -f ~/Library/Logs/mcp/mcp-server-redis.log
-```
+Now Go Back to the MCP Server Terminal to verify the following : 
 
-## Example Use Cases
-- **AI Assistants**: Enable LLMs to fetch, store, and process data in Redis.
-- **Chatbots & Virtual Agents**: Retrieve session data, manage queues, and personalize responses.
-- **Data Search & Analytics**: Query Redis for **real-time insights and fast lookups**.
-- **Event Processing**: Manage event streams with **Redis Streams**.
+If you see the screen below, it’s GOOD and the connection was initiated from a MCP Client for Redis cluster from the source IP/Port. —> 163.192.199.110:45012 - "POST /mcp/ HTTP/1.1" 200 OK 
+
+
+
+Step 3. Langraph Dev Setup
+=======================
+ssh -i ssh-key-mcp-agent.key opc@opc@192.1.1.2
+
+cd mcp_redis/mcp_server
+source .venv_agent_client/bin/activate
+
+nohup langgraph dev --config langgraph.json --allow-blocking --host 0.0.0.0 --port 8002 > langgraph_8002.log 2>&1 &
+
+This is what you would expect.
+
+
+
+You can share this URL to the consumer of the Ask Data GetInsights Agent.  The API produced will be used for down stream API to expose the LangGraph Agent to a consumer.
+
+ http://192.1.1.2:8002/docs
+
+Step 4. Fast API Setup (Consumer to LangGraph Agent)
+============================================
+ssh -i ssh-key-mcp-agent.key opc@1opc@192.1.1.2
+
+cd mcp_redis/mcp_server
+source .venv_agent_client/bin/activate
+
+nohup python3.13 -m uvicorn app.getinsights.fastapi_getinsights:app --reload --host 0.0.0.0 --port 8004 > uvicorn_8004.log 2>&1 &
+
+You can share this URL to the consumer of the Ask Data GetInsights Agent
+
+http://192.1.1.2:8004/docs 
+
+You can now Test The System using Swagger or CURL command as described below. Also the system is now ready to be consumbed by AskData VBCS app.
+
+
+
+Step 1. This is a PING Test for AskData Agent. A response 200 OK means the Agent is up and running. This url is only for testing purpose.
+
+Get Request:
+
+curl -X 'GET' \
+  'http://192.1.1.2:8004/askdata/search_assistant_id' \
+  -H 'accept: application/json'
+
+
+
+Expected Output: Status 200
+
+Response body
+Download
+"0468dc38-81bf-5b14-969d-81bd9f36e07d"
+
+
+
+Step 2: Create a Thread to be able to manage session state (Chat History). This would be ideally created during the launch of the AskData Agentic AI UI pop-up. This will ensure the entire history of conversation is maintained for that session id.
+
+curl -X 'GET' \
+  'http://192.1.1.2:8004/askdata/getsession' \
+  -H 'accept: application/json'
+Expected Response : Status 200
+
+
+Response body
+Download
+"38a90807-3b42-4976-989c-3c76e76be65e"
+
+
+Step 3: This is where you post the Prompt to the LLM and get an AI Response back
+
+
+# Replace the Thread retrieved from step 2
+
+curl -X 'POST' \
+  'http://192.1.1.2:8004/askdata/getinsights' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "stream_mode": "values",
+  "prompt": "get business insights for key 123456",
+  "thread_id": "38a90807-3b42-4976-989c-3c76e76be65e"
+}'
+
+
+Expected Response: Status 200
+
+{
+  "content": "The key '123456' does not exist."
+}
+
+
+ 

@@ -21,12 +21,35 @@ podman pull container-registry.oracle.com/database/free:latest
 ### 6)
 podman volume create oradata
 
+
 ### 7) 
 podman run -d --name oracle-free \
   -p 1521:1521 \
   -v oradata:/opt/oracle/oradata \
   -e ORACLE_PWD=Oracle_123 \
   container-registry.oracle.com/database/free:latest
+
+### ) Optional Step
+
+1. Check what’s running / existing
+podman ps -a | grep oracle-free
+
+
+That will show if the container is running or just stopped.
+
+2. If you want to reuse the same name
+
+Stop it:
+
+podman stop oracle-free
+
+
+Remove it:
+
+podman rm oracle-free
+
+
+Then re-run your podman run ... --name oracle-free ....
 
 ### 8) 
 podman logs -f oracle-free   # watch startup
