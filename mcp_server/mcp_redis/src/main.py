@@ -1,5 +1,4 @@
 import sys
-
 from src.common.connection import RedisConnectionManager
 from src.common.server import mcp
 import uvicorn
