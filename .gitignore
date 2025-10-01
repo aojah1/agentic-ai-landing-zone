@@ -21,3 +21,6 @@ mcp_server/dbtools-mcp-server/config/.env
 mcp_server/dbtools-mcp-server/src/__pycache__/
 mcp_server/dbtools-mcp-server/src/common/__pycache__
 client/.DS_Store
+.DS_Store
+client/.DS_Store
+client/ai_ops/src/common/__pycache__/config.cpython-313.pyc

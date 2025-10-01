@@ -61,6 +61,7 @@ One common place to configure access to OCI-hosted LLMs, BYO LLMs through DataSc
 	python3.13 -m src.llm.oci_embedding_model
 
 #### Deploy an LLM in OCI Data Science AQUA
+(TBD ADD LINK to GITHUB from AI WORLD HOL )
 
     python3.13 -m src.llm.oci_ds_md
 
@@ -86,24 +87,46 @@ Follow the steps per this website:
 #### D) MCP LocalFile System: 
 
 Follow the steps per this website:
+
+    https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem
   
 #### E) OCI RAG Service Tool: 
 
-Follow the steps
+Uses Oracle pre-built RAG Agent Services
+
+    python3.13 -m src.tools.rag_agent
 
 #### E) Run Python Tool: 
 
-Follow the steps
+Create a custom tool to run untrusted Python in a sandbox-like context.
+
+    python3.13 -m src.tools.python_scratchpad
+
+
+#### F) Test all of the MCP Server before building Agent Orchestration
+
+Run the below in a Terminal, which will open a browser to that can be used to test the MCP Servers been used
+
+		npx @modelcontextprotocol/inspector
+
 
 ## Step 4) Agent Memory
 
+DB Operator implements a short term memory using local RAM form the cpu the agent is running on
+
 ## Step 5) Agent Orchestration
+
+The DB Operator Agent follows a Solo Agent Architecture pattern, with multiple tools.
+
+    python3.13 -m src.agents.db_operator
 
 ## Step 6) User Interface
 
+![alt text](/client/ai_ops/images/ui.png)
+
 ## Step 7) Agent Evaluation
 
-
+![alt text](/client/ai_ops/images/metro.png)
 
 ### Build/Deploy an DB Operator Agent
 
@@ -126,41 +149,31 @@ Follow the steps
 
     which user I am connecting with 
 
-    list tablespace utilization and free space
-
-    Verify database accessibility via sqlplus or SQL Developer
+    list tablespace utilization and free space. Can you plot the results in an html format and store it in my local file system. Open in a browser running open command.
 
 > Document the Environment
 
-    Record SID, DB name, listener ports, admin passwords (securely)
-
-    Capture system architecture, version details, and patch level
+    Record SID, DB name, listener ports, admin passwords (securely). Pretty print please.
 
 ========================================
 
 ### DB Developer with schema access only
 =========================================
 
+> Connect to Oracle DB -
+
+    show me all connections
+
+    use <your connections> to connect
+
     what schema I have access to 
 
-    clear all memory
+    Use the RAG service. What are the best security principles I need to be aware of while building Vector DB in Oracle 23.ai
 
-    going forward by default use the schema <<Your Schema >> every time
+    Using the above best security principles, create a table test_vector_with_security_demo_1 and create a column for storing vector embedding data
 
-    create all the related tables as described in the following ERD. Use Oracle 23.AI JSON database type to create all the tables : 
+    what best security principles was applied while creating this table
 
-    organizations
-     ├── departments
-     │    ├── employees
-     │    │    └── roles
-     │    └── budgets
-     ├── goals
-     │    └── objectives
-     │         └── key_results
-     └── projects
-          ├── tasks
-          └── milestones
+    get the README.md from my local file and using an embedding capability of your LLM, create a vector and store it in the table 'test_vector_with_security_demo_1' so that I can do a vector retrieval later.
 
-Invoke the RAG Service with Oracle product documentation knowledge base
-
-    tell me what security process are available in oracle 23.ai
+    using vector retrieval capability of LLM againts test_vector_with_security_demo_1' table, what are the steps for deploying a local db ?

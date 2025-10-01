@@ -2,25 +2,8 @@ import os
 from pathlib import Path
 # ─── OCI LLM ──────────────────────────────────────────
 from langchain_community.chat_models import ChatOCIGenAI
-from dotenv import load_dotenv
+from src.common.config import *
 
-# ────────────────────────────────────────────────────────
-# 1) bootstrap paths + env + llm
-# ────────────────────────────────────────────────────────
-THIS_DIR     = Path(__file__).resolve()
-PROJECT_ROOT = THIS_DIR.parent.parent.parent
-print(PROJECT_ROOT)
-load_dotenv(PROJECT_ROOT / "config/.env")
-
-#────────────────────────────────────────────────────────
-# OCI GenAI configuration
-# ────────────────────────────────────────────────────────
-COMPARTMENT_ID = os.getenv("OCI_COMPARTMENT_ID")
-ENDPOINT       = os.getenv("OCI_GENAI_ENDPOINT")
-MODEL_ID       = os.getenv("OCI_GENAI_MODEL_ID")
-PROVIDER       = os.getenv("PROVIDER")
-AUTH_TYPE      = "API_KEY"
-OCI_PROFILE = os.getenv("OCI_PROFILE")
 
 
 def initialize_llm():
@@ -35,7 +18,7 @@ def initialize_llm():
                 "max_tokens": 3000,
                 # remove any unsupported kwargs like citation_types
             },
-            auth_type=AUTH_TYPE,
+            auth_type="API_KEY",
             auth_profile=OCI_PROFILE,
         )
     except Exception as e:

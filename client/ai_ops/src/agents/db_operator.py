@@ -25,7 +25,7 @@ from langchain_core.messages import HumanMessage
 # For OCI GenAI Service
 from langchain.agents import initialize_agent, Tool, AgentType
 from langchain_core.messages import AIMessage
-from src.llm.oci_genai import initialize_llm
+from src.llm.oci_ds_md import initialize_llm
 from src.prompt_engineering.topics.db_operator import promt_oracle_db_operator
 from src.tools.rag_agent import _rag_agent_service
 from src.tools.python_scratchpad import run_python

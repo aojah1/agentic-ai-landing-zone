@@ -8,20 +8,9 @@ import os
 import re
 from oci.generative_ai_agent_runtime import GenerativeAiAgentRuntimeClient
 from oci.generative_ai_agent_runtime.models import CreateSessionDetails
+from src.common.config import *
 
-from dotenv import load_dotenv
-from pathlib import Path
-
-THIS_DIR     = Path(__file__).resolve()
-PROJECT_ROOT = THIS_DIR.parent.parent.parent
-print(PROJECT_ROOT)
-load_dotenv(PROJECT_ROOT / "config/.env")
-
-# Set up the OCI GenAI Agents endpoint configuration
-AGENT_EP_ID = os.getenv("AGENT_EP_ID")
-AGENT_SERVICE_EP = os.getenv("AGENT_SERVICE_EP")
-
-config = oci.config.from_file(profile_name="DEFAULT")  # Update this with your own profile name
+config = oci.config.from_file(profile_name=OCI_PROFILE)  # Update this with your own profile name
 sess_id = ""
 
 
@@ -63,7 +52,7 @@ def rag_agent_service(inp: str):
 # Test Cases -
 def test_case():
     #The logged in user ID is: user_123. What is the response API ?
-    response = rag_agent_service("Is a $500 client lunch at steakhouse deductible?")
+    response = rag_agent_service("What is the best security practice to create a database in Oracle 23.ai ? ")
 
     print(response.data.message.content.text)
 

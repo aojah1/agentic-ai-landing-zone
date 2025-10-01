@@ -77,6 +77,8 @@ MCP is an open standard that enables developers to build secure, two‑way conne
     >>Follow this instruction on how to deploy your tools (Custom Functions) into Oracle DataScience using MCP architecture
 https://blogs.oracle.com/ai-and-datascience/post/hosting-mcp-servers-on-oci-data-science
 
+TBD: ADD HOW TO DEPLOY STEP BY STEP AN MCP SERVER
+
 ## MCP Server Library
     cd mcp_server
 
