@@ -35,26 +35,10 @@ import matplotlib
 matplotlib.use("Agg")
 import warnings
 warnings.filterwarnings("ignore")
+from src.common.config import *
 
-# ────────────────────────────────────────────────────────
-# 1) bootstrap paths + env + llm
-# ────────────────────────────────────────────────────────
-THIS_DIR = Path(__file__).resolve()
-PROJECT_ROOT = THIS_DIR.parent.parent.parent
 
-load_dotenv(PROJECT_ROOT / "config/.env")  # expects OCI_ vars in .env
 
-# Set up the OCI GenAI Agents endpoint configuration
-OCI_CONFIG_FILE = os.getenv("OCI_CONFIG_FILE")
-OCI_PROFILE = os.getenv("OCI_PROFILE")
-AGENT_EP_ID = os.getenv("AGENT_EP_ID")
-AGENT_SERVICE_EP = os.getenv("AGENT_SERVICE_EP")
-AGENT_KB_ID = os.getenv("AGENT_KB_ID")
-AGENT_REGION = os.getenv("AGENT_REGION")
-SQLCLI_MCP_PROFILE = os.getenv("SQLCLI_MCP_PROFILE")
-TAVILY_MCP_SERVER = os.getenv("TAVILY_MCP_SERVER")
-FILE_SYSTEM_ACCESS_KEY=os.getenv("FILE_SYSTEM_ACCESS_KEY")
-print(FILE_SYSTEM_ACCESS_KEY)
 
 # ────────────────────────────────────────────────────────
 # 2) Logic
@@ -91,45 +75,47 @@ class RunSQLInput(BaseModel):
 
 def user_confirmed_tool(tool):
     async def wrapper(*args, **kwargs):
-        # Support raw string input or keyword arguments (from structured agent)
-        if args and isinstance(args[0], str):
-            sql_query = args[0]
-            model = "oci/generativeai-chat:2024-05-01"
-            sqlcl_param = "sqlcl"  # Default
-        else:
-            sql_query = kwargs.get("sql", "select sysdate from dual")
-            model = kwargs.get("model", "oci/generativeai-chat:2024-05-01")
-            sqlcl_param = kwargs.get("sqlcl", "sqlcl")  # Changed key to sqlcl
+        try:
+            # Support raw string input or keyword arguments (from structured agent)
+            if args and isinstance(args[0], str):
+                sql_query = args[0]
+                model = "oci/generativeai-chat:2024-05-01"
+                sqlcl_param = "sqlcl"  # Default
+            else:
+                sql_query = kwargs.get("sql", "select sysdate from dual")
+                model = kwargs.get("model", "oci/generativeai-chat:2024-05-01")
+                sqlcl_param = kwargs.get("sqlcl", "sqlcl")  # Changed key to sqlcl
 
-        # Debug logging
-        print(f"DEBUG: Preparing payload - SQL: {sql_query}, Model: {model}, SQLCL: {sqlcl_param}")
+            # Debug logging
+            print(f"DEBUG: Preparing payload - SQL: {sql_query}, Model: {model}, SQLCL: {sqlcl_param}")
 
-        if AUTO_APPROVE == 'Y':
-            approved = True
-        else:
-            print(f"\n\033[93mA SQL query is about to be executed by the agent:\033[0m")
-            print(f"\033[97m{sql_query}\033[0m")
-            confirmation = await asyncio.to_thread(input, "ALLOW this SQL execution? (y/n): ")
-            approved = confirmation.lower() in {'y', 'yes'}
+            if AUTO_APPROVE == 'Y':
+                approved = True
+            else:
+                print(f"\n\033[93mA SQL query is about to be executed by the agent:\033[0m")
+                print(f"\033[97m{sql_query}\033[0m")
+                confirmation = await asyncio.to_thread(input, "ALLOW this SQL execution? (y/n): ")
+                approved = confirmation.lower() in {'y', 'yes'}
 
-        if approved:
-            payload = {
-                "sql": sql_query,
-                "model": model,
-                "sqlcl": sqlcl_param  # Changed key to sqlcl
-            }
-            try:
-                if hasattr(tool, 'ainvoke'):
-                    return await tool.ainvoke(payload)
-                elif hasattr(tool, 'invoke'):
-                    return tool.invoke(payload)
-                else:
-                    return tool.run(**payload)
-            except Exception as e:
-                return f"ERROR: Failed to execute SQLcl tool - {str(e)}\nIf 'sqlcl parameter is required', ensure SQLcl is installed and in PATH."
-        else:
-            return "⚠️ Execution cancelled by user."
-
+            if approved:
+                payload = {
+                    "sql": sql_query,
+                    "model": model,
+                    "sqlcl": sqlcl_param  # Changed key to sqlcl
+                }
+                try:
+                    if hasattr(tool, 'ainvoke'):
+                        return await tool.ainvoke(payload)
+                    elif hasattr(tool, 'invoke'):
+                        return tool.invoke(payload)
+                    else:
+                        return tool.run(**payload)
+                except Exception as e:
+                    return f"ERROR: Failed to execute SQLcl tool - {str(e)}\nIf 'sqlcl parameter is required', ensure SQLcl is installed and in PATH."
+            else:
+                return "⚠️ Execution cancelled by user."
+        except Exception as e:
+            return f"ERROR: Wrapper failure: {e}"
     return StructuredTool(
         name=tool.name,
         description=tool.description,

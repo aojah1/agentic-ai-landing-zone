@@ -11,6 +11,7 @@ python-dotenv>=1.0.0
 streamlit
 appdirs
 oci
+oracle-ads
 langchain
 langchain-core
 langchain_community

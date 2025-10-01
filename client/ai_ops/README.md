@@ -7,65 +7,20 @@ it's job. Context include knowledge about local file system to work with, abilit
 
 ![db_operator.png](/client/ai_ops/images/db_operator.png)
 
-
-# Getting started with Oracle AI Agents in 7 step :
-
-## Step 1) System Prompt
-
-## Step 2) Configure LLM
-
-## Step 3) Configure MCP Server
-### A) MCP SQLcli: 
-
-Follow the steps per this document to configure MCP Server for SQLcli: 
-
-    https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
-
-### B) MCP DB_Tools: 
-
-Follow the steps per this github repo: 
-
-    https://github.com/aojah1/agentic-ai-landing-zone/tree/main/mcp_server/dbtools-mcp-server
-
-### C) MCP WebSearch with Tavily: 
-
-Follow the steps per this website:
-
-    https://docs.tavily.com/documentation/mcp
-
-### D) MCP LocalFile System: 
-
-Follow the steps per this website:
-  
-### E) OCI RAG Service Tool: 
-
-Follow the steps
-
-### E) Run Python Tool: 
-
-Follow the steps
-
-## Step 4) Agent Memory
-
-## Step 5) Agent Orchestration
-
-## Step 6) User Interface
-
-## Step 7) Agent Evaluation
-
 # Configure your development environment
 
 ### Client Library
-    cd mcp_client
+    cd client/ai_ops
 
 ### Configuring and running the agent
-    python3.13 -m venv .venv_mcp_client_aiops
-    source .venv_mcp_client_aiops/bin/activate
+    python3.13 -m venv .venv_client_aiops
+    source .venv_client_aiops/bin/activate
 
 ### Installing all the required packages
 
 After you create a project and a virtual environment, install the latest version of required packages:
-> python3.13 -m pip install -r requirements.txt
+    
+    python3.13 -m pip install -r requirements.txt
 
 ### Configuring your .env (config) file
 > Rename the /config/sample_.env to /config/.env
@@ -78,6 +33,77 @@ The server uses OCI's built-in authentication and authorization mechanisms, incl
 > OCI config file-based authentication
 
 > Signer-based authentication for specific endpoints
+
+# Getting started with Oracle AI Agents in 7 step :
+
+## Step 1) System Prompt
+
+Define the System Prompt for the Agent DB_Operator with a role in mind and following this pattern : 
+
+CONTEXT >> ROLE >> OBJECTIVE >> FORMAT >> TONE / STYLE >> CONSTRAINTS
+
+    python3.13 -m src.prompt_engineering.topics.db_operator
+
+## Step 2) Configure LLM
+
+One common place to configure access to OCI-hosted LLMs, BYO LLMs through DataScience Quick Action
+
+#### OCI Gen AI LLM
+
+	python3.13 -m src.llm.oci_genai
+
+#### OCI Gen AI RAG Service
+
+    python3.13 -m src.llm.oci_genai_agent
+
+#### OCI Gen AI Embedding Service
+		
+	python3.13 -m src.llm.oci_embedding_model
+
+#### Deploy an LLM in OCI Data Science AQUA
+
+    python3.13 -m src.llm.oci_ds_md
+
+## Step 3) Configure MCP Server
+#### A) MCP SQLcli: 
+
+Follow the steps per this document to configure MCP Server for SQLcli: 
+
+    https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
+
+#### B) MCP DB_Tools: 
+
+Follow the steps per this github repo: 
+
+    https://github.com/aojah1/agentic-ai-landing-zone/tree/main/mcp_server/dbtools-mcp-server
+
+#### C) MCP WebSearch with Tavily: 
+
+Follow the steps per this website:
+
+    https://docs.tavily.com/documentation/mcp
+
+#### D) MCP LocalFile System: 
+
+Follow the steps per this website:
+  
+#### E) OCI RAG Service Tool: 
+
+Follow the steps
+
+#### E) Run Python Tool: 
+
+Follow the steps
+
+## Step 4) Agent Memory
+
+## Step 5) Agent Orchestration
+
+## Step 6) User Interface
+
+## Step 7) Agent Evaluation
+
+
 
 ### Build/Deploy an DB Operator Agent
 

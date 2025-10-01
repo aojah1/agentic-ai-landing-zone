@@ -8,7 +8,7 @@
 
 ### Applications
 > An application is what gets deployed at the client side, for users or machines to interact with.
-> Apps can be exposed either as an API or a UI.
+> Apps can be exposed either as an API or an UI.
 
 ### Agent Teams
 > A structured sequence of steps or actions that the AI Agent follows to accomplish a specific business task or answer a user query.
@@ -22,6 +22,7 @@ Agent can connect to other systems, API's or tools, which allows the agent to ut
 
 > System Prompt:
 >> Each agent has a system prompt. The system prompt defines the Agents personas and capabilities. It establishes the tool it can access. It also describe how the Agent should think about achieving any goals or task for which it was designed.
+
 Use a consistent pattern : 
 CONTEXT >> ROLE >> OBJECTIVE >> FORMAT >> TONE / STYLE >> CONSTRAINTS
 
