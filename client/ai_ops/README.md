@@ -61,7 +61,10 @@ One common place to configure access to OCI-hosted LLMs, BYO LLMs through DataSc
 	python3.13 -m src.llm.oci_embedding_model
 
 #### Deploy an LLM in OCI Data Science AQUA
-(TBD ADD LINK to GITHUB from AI WORLD HOL )
+
+Deploy any LLM in OCI Data Sciane AQUA following the link below: 
+
+    https://github.com/oracle-devrel/oci-ai-quickactions-demo
 
     python3.13 -m src.llm.oci_ds_md
 
