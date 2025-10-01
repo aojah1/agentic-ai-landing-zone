@@ -69,11 +69,25 @@ Deploy any LLM in OCI Data Sciane AQUA following the link below:
     python3.13 -m src.llm.oci_ds_md
 
 ## Step 3) Configure MCP Server
+
+Test all of the MCP Server before building Agent Orchestration. Run the below in a Terminal, which will open a browser to that can be used to test the MCP Servers been used.
+
+	npx @modelcontextprotocol/inspector
+
+
 #### A) MCP SQLcli: 
 
 Follow the steps per this document to configure MCP Server for SQLcli: 
 
     https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
+    https://github.com/aojah1/agentic-ai-landing-zone/blob/main/client/ai_ops/src/agents/README.md
+    
+Testing:
+
+    Transport: STDIO
+    Command: /Applications/sqlcl/bin/sql
+    Args: -mcp
+    Prompt: select * from dual;
 
 #### B) MCP DB_Tools: 
 
@@ -81,17 +95,43 @@ Follow the steps per this github repo:
 
     https://github.com/aojah1/agentic-ai-landing-zone/tree/main/mcp_server/dbtools-mcp-server
 
+Testing:
+
+    Transport: Streamable HTTP
+	Command: http://127.0.0.1:8001/mcp
+
 #### C) MCP WebSearch with Tavily: 
 
 Follow the steps per this website:
 
     https://docs.tavily.com/documentation/mcp
 
+    Prompt Tavily Search : what is the best mexican food I can find in cancun mexico ?
+
+Testing:
+
+    Transport: STDIO
+    Command: npx
+    Args: 
+        -y mcp-remote "https://mcp.tavily.com/mcp/?tavilyApiKey=xxx"
+
+
+
 #### D) MCP LocalFile System: 
 
 Follow the steps per this website:
 
     https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem
+
+Testing:
+
+    Transport: STDIO
+    Command: npx
+    Args: 
+        -y @modelcontextprotocol/server-filesystem /Users/...
+
+    READ FILE:
+        /Users/..../logs.txt
   
 #### E) OCI RAG Service Tool: 
 
@@ -104,13 +144,6 @@ Uses Oracle pre-built RAG Agent Services
 Create a custom tool to run untrusted Python in a sandbox-like context.
 
     python3.13 -m src.tools.python_scratchpad
-
-
-#### F) Test all of the MCP Server before building Agent Orchestration
-
-Run the below in a Terminal, which will open a browser to that can be used to test the MCP Servers been used
-
-		npx @modelcontextprotocol/inspector
 
 
 ## Step 4) Agent Memory
