@@ -5,22 +5,27 @@ AGENT SETUP
 
 ### Step 1. MCP Redis Server Setup
 ==================================
-  
+
+Deploy a Redis MCP Server following the repo here :
+
+https://github.com/aojah1/agentic-ai-landing-zone/blob/main/mcp_server/mcp_redis/README.md
+
     ssh -i ssh-key-mcp-agent.key opc@192.1.1.1
-    cd mcp_redis/mcp_server
+    cd mcp_server/mcp_redis
     python3.13 -m venv .venv_redis_server
     source .venv_redis_server/bin/activate
     python3.13 -m pip install -r requirements.txt
+
     nohup python3.13 main.py > mcp_server_8003.log 2>&1 &
 
 Note: This will start the MCP Server with http streamable protocol. 
 ![image.png](/client/ask_data/images/image.png)
 
 ### Step 2. MCP Agent/Client Setup
-===========================
+====================================
 
     ssh -i ssh-key-mcp-agent.key opc@192.1.1.2
-    cd mcp_redis/mcp_server
+    cd client/ask_data
     python3.13 -m venv .venv_agent_client
     source .venv_agent_client/bin/activate
     python3.13 -m pip install -r requirements.txt
