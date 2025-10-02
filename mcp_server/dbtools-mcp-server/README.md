@@ -40,15 +40,20 @@ dbtools-mcp-server.py is a FastMCP-based server that provides various tools for 
 - OCI SDK (installed via requirements.txt)
 - Valid OCI configuration file with credentials
 
-## Installation
+## Configure your development environment
 
-1. Clone this repository.
-2. Install required dependencies using pip:
-   ```
-   pip install -r requirements.txt
-   ```
-   This will install `oci`, `requests`, `fastmcp`, and all other dependencies.
-3. Set up your OCI config file at ~/.oci/config
+### Server Library
+    cd mcp_server/dbtools-mcp-server
+
+### Configuring and running the agent
+    python3.13 -m venv .venv_mcp_dbtools
+    source .venv_mcp_dbtools/bin/activate
+
+### Installing all the required packages
+
+After you create a project and a virtual environment, install the latest version of required packages:
+    
+    python3.13 -m pip install -r requirements.txt
 
 ## OCI Configuration
 
@@ -67,6 +72,22 @@ see the [OCI SDK documentation](https://docs.oracle.com/en-us/iaas/Content/API/C
 The get_table_info tool supports the following database types:
 - Oracle Database
 - MySQL (including HeatWave)
+
+## Build/Deploy the DBTools MCP Server
+
+    python3.13 -m src.main
+
+Note: The IP and the Port for the MCP Server is defined in the .env file 
+
+## Test MCP Server 
+Test all of the MCP Server before building Agent Orchestration. Run the below in a Terminal, which will open a browser to that can be used to test the MCP Servers been used.
+
+	npx @modelcontextprotocol/inspector
+
+  Testing:
+
+    Transport: Streamable HTTP
+	Command: http://127.0.0.1:8001/mcp
 
 ## MCP Server Configuration
 Installation is dependent on the MCP Client being used, it usually consists of adding the MCP Server invocation in a json config file, for example with Claude UI on windows it looks like this:

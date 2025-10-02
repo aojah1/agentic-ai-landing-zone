@@ -49,22 +49,11 @@ After you create a project and a virtual environment, install the latest version
     
     python3.13 -m pip install -r requirements.txt
 
-### Configuring your .env (config) file
-> Rename the /config/sample_.env to /config/.env
-> 
-> Change the config variables based on your agents requirements
+### OCI Configuration
 
-### Security
-The server uses OCI's built-in authentication and authorization mechanisms, including:
-
-> OCI config file-based authentication
->
-> Signer-based authentication for specific endpoints
-
-> configure ~/.oci/config
-
-    https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdkconfig.htm
-
+The server requires a valid OCI config file with proper credentials. 
+The default location is ~/.oci/config. For instructions on setting up this file, 
+see the [OCI SDK documentation](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdkconfig.htm).
 
 ## Configuration of Redis DB
 
@@ -89,3 +78,13 @@ To configure this Redis MCP Server, consider the following environment variables
     python3.13 -m src.main
 
 Note: The IP and the Port for the MCP Server is defined in the .env file 
+
+### Test MCP Server 
+Test all of the MCP Server before building Agent Orchestration. Run the below in a Terminal, which will open a browser to that can be used to test the MCP Servers been used.
+
+	npx @modelcontextprotocol/inspector
+
+  Testing:
+
+    Transport: Streamable HTTP
+	Command: http://127.0.0.1:8002/mcp
