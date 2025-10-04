@@ -24,3 +24,4 @@ client/.DS_Store
 .DS_Store
 client/.DS_Store
 client/ai_ops/src/common/__pycache__/config.cpython-313.pyc
+mcp_server/mcp_redis/ocir.sh

@@ -88,3 +88,15 @@ Test all of the MCP Server before building Agent Orchestration. Run the below in
 
     Transport: Streamable HTTP
 	Command: http://127.0.0.1:8002/mcp
+
+
+### Deploy the MCP Server as a Remote Hosted Server using HTTP-Streamable on OCI DataScience
+
+    cd mcp_server/mcp_redis
+
+    # Create a OCI Auth Token for the user name to be used
+    podman login iad.ocir.io  # namespace/oracleidentitycloudservice/<user name>
+
+podman build -t "${IMAGE}" -f Dockerfile .   # Build Docker container
+
+
