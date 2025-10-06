@@ -25,3 +25,9 @@ client/.DS_Store
 client/.DS_Store
 client/ai_ops/src/common/__pycache__/config.cpython-313.pyc
 mcp_server/mcp_redis/ocir.sh
+client/open_ai_agents/src/agents/research_bot/planner.py
+client/open_ai_agents/src/agents/research_bot/search.py
+client/open_ai_agents/src/agents/research_bot/writer.py
+client/open_ai_agents/src/agents/research_bot/__pycache__/planner.cpython-313.pyc
+client/open_ai_agents/src/agents/research_bot/__pycache__/search.cpython-313.pyc
+client/open_ai_agents/src/agents/research_bot/__pycache__/writer.cpython-313.pyc
