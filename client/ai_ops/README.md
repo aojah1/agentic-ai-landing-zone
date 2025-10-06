@@ -81,6 +81,34 @@ Follow the steps per this document to configure MCP Server for SQLcli:
 
     https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
     https://github.com/aojah1/agentic-ai-landing-zone/blob/main/client/ai_ops/src/agents/README.md
+
+    #Download && Install SQLcl
+    mkdir sqlcl
+    cd sqlcl
+    wget https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-latest.zip
+    unzip sqlcl-latest.zip
+
+    #Run SQLcl and save a Connection
+    ./bin/sql /nolog
+    SQL> conn -save myConn -savepwd username/mypasswd@localhost:1521/freepdb1
+
+    #Configure MCP
+    {
+        "mcpServers": {
+            "sqlcl": {
+            "timeout": 6000,
+            "type": "stdio",
+            "command": "/path-to/sqlcl-25.3.0/sqlcl/bin/sql",
+            "args": [
+                "-mcp"
+            ]
+            }
+        }
+    }
+
+> ask questions
+
+    "Connect to the myConn database and do X"
     
 Testing:
 
