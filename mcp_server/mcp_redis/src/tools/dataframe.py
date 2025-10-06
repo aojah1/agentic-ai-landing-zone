@@ -39,7 +39,7 @@ import redis
 
 
 @mcp.tool()
-async def getdf(key: str)  -> str:
+async def getdf(key: str)  -> dict:
     """Get a Redis string value.
 
     Args:
@@ -55,8 +55,11 @@ async def getdf(key: str)  -> str:
     # host='amaaaaaawe6j4fqaxqkbzpawdnhcyt2brjexcaamvemvgpbmhotsozgj46qa-p.redis.us-chicago-1.oci.oraclecloud.com',
     # ssl=True, decode_responses=False, port=6379)
 
-    key_name = f"idata:{key}:latest"
+    key_name = f"idata:{key}:idata:latest"
+    #print(key_name)
+    
     raw = r.get(key_name)
+    #print(raw)
 
     if raw is None:
         return f"Key {key_name} does not exist"
@@ -70,14 +73,16 @@ async def getdf(key: str)  -> str:
     except Exception as e:
         return f"Error unpickling data from {key_name}: {e}"
 
+    print(df)
     # now handle an empty DataFrame explicitly
     if isinstance(df, DataFrame) and df.empty:
         return DataFrame({"message": [f"Key {key_name} exists but contains an empty DataFrame"]})
 
+
     # finally, serialize the DataFrame for return
     # you can choose CSV, JSON, etc. Here’s JSON split-orient:
+    #return df.to_json(orient="records")
     return df
-    #return df
 
 async def main():
     df = await getdf("02e4b9e5-5e92-4836-b589-7536266c7baa")
