@@ -10,29 +10,30 @@ Deploy a Redis MCP Server following the repo here :
 
 https://github.com/aojah1/agentic-ai-landing-zone/blob/main/mcp_server/mcp_redis/README.md
 
-    ssh -i ssh-key-mcp-agent.key opc@192.1.1.1
-    cd mcp_server/mcp_redis
+    cd /home/opc/agentic-ai-landing-zone/mcp_server/mcp_redis
     python3.13 -m venv .venv_redis_server
     source .venv_redis_server/bin/activate
     python3.13 -m pip install -r requirements.txt
 
-    nohup python3.13 main.py > mcp_server_8003.log 2>&1 &
+    nohup python3.13 -m src.main > mcp_server_8003.log 2>&1 &
 
 Note: This will start the MCP Server with http streamable protocol. 
+
+tail -f map_server_8003.log
+
 ![image.png](/client/ask_data/images/image.png)
 
 ### Step 2. MCP Agent/Client Setup
 ====================================
 
-    ssh -i ssh-key-mcp-agent.key opc@192.1.1.2
-    cd client/ask_data
+    cd /home/opc/agentic-ai-landing-zone/client/ask_data
     python3.13 -m venv .venv_agent_client
     source .venv_agent_client/bin/activate
     python3.13 -m pip install -r requirements.txt
 
 ### Run Few Test Cases to ensure MCP Client and MCP Server are able to communicate with the REDIS as a backend DB
 
-    python3.13 -m app.getinsights.askdata_getinsights
+    python3.13 -m src.agent_teams.askdata_getinsights
 
 Note: This will start an interactive session, that you can use to start interactinng with the REDIS MCP Server.
 ![image-3.png](/client/ask_data/images/image-3.png)
@@ -46,12 +47,15 @@ If you see the screen below, it’s GOOD and the connection was initiated from a
 Step 3. Langraph Dev Setup
 =======================
 
-    ssh -i ssh-key-mcp-agent.key opc@opc@192.1.1.2
-    cd mcp_redis/mcp_server
+    cd /home/opc/agentic-ai-landing-zone/client/ask_data
     source .venv_agent_client/bin/activate
-    nohup langgraph dev --config langgraph.json --allow-blocking --host 0.0.0.0 --port 8002 > langgraph_8002.log 2>&1 &
+    
+    nohup langgraph dev --no-reload --config langgraph.json --allow-blocking --host 0.0.0.0 --port 8002 > langgraph_dev_8002.log 2>&1 &
 
 This is what you would expect.
+
+tail -f langgraph_dev_8002.log
+
 ![image-4.png](/client/ask_data/images/image-4.png)
 You can share this URL to the consumer of the Ask Data GetInsights Agent.  The API produced will be used for down stream API to expose the LangGraph Agent to a consumer.
 
@@ -59,12 +63,11 @@ You can share this URL to the consumer of the Ask Data GetInsights Agent.  The A
 
 Step 4. Fast API Setup (Consumer to LangGraph Agent)
 ============================================
-    ssh -i ssh-key-mcp-agent.key opc@1opc@192.1.1.2
 
-    cd mcp_redis/mcp_server
+    cd /home/opc/agentic-ai-landing-zone/client/ask_data
     source .venv_agent_client/bin/activate
 
-    nohup python3.13 -m uvicorn app.getinsights.fastapi_getinsights:app --reload --host 0.0.0.0 --port 8004 > uvicorn_8004.log 2>&1 &
+    nohup python3.13 -m uvicorn src.apps.fastapi_getinsights:app --reload --host 0.0.0.0 --port 8004 > uvicorn_8004.log 2>&1 &
 
 You can share this URL to the consumer of the Ask Data GetInsights Agent
 
