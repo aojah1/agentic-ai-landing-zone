@@ -55,6 +55,12 @@ The server requires a valid OCI config file with proper credentials.
 The default location is ~/.oci/config. For instructions on setting up this file, 
 see the [OCI SDK documentation](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdkconfig.htm).
 
+## Install Redis DB
+podman run -d --name redis -p 6379:6379 -v redis-data:/data \
+  docker.io/library/redis:7-alpine redis-server --appendonly yes --loglevel warning
+
+redis-cli -h 127.0.0.1 -p 6379 ping
+
 ## Configuration of Redis DB
 
 To configure this Redis MCP Server, consider the following environment variables:

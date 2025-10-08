@@ -25,9 +25,6 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, Remo
 from langgraph.graph import MessagesState
 from langchain_core.tools import BaseTool
 
-from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
-
 from src.llm.oci_genai import initialize_llm
 #from llm.oci_ds_md import initialize_llm
 from src.system_prompt.prompts import *

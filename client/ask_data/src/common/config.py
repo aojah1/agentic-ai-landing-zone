@@ -18,20 +18,13 @@ COMPARTMENT_ID = os.getenv("OCI_COMPARTMENT_ID")
 ENDPOINT       = os.getenv("OCI_GENAI_ENDPOINT")
 MODEL_ID       = os.getenv("OCI_GENAI_MODEL_ID")
 PROVIDER       = os.getenv("PROVIDER")
-AUTH_TYPE      = "API_KEY"
+AUTH_TYPE      = os.getenv("AUTH_TYPE")
 CONFIG_PROFILE = "DEFAULT"
 
 #────────────────────────────────────────────────────────
 # Path to Prompt Environment
 # ────────────────────────────────────────────────────────
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "LOCAL")
-
-#────────────────────────────────────────────────────────
-# OCI GenAI Agents endpoint configuration
-# ────────────────────────────────────────────────────────
-AGENT_EP_ID = os.getenv("AGENT_EP_ID")
-AGENT_SERVICE_EP = os.getenv("AGENT_SERVICE_EP")
-
 
 # ────────────────────────────────────────────────────────────────
 # Configure MCP Connections to SSE (Streamable HTTP)
