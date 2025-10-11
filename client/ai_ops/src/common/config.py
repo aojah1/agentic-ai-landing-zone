@@ -49,10 +49,6 @@ MCP_TRANSPORT= os.getenv("MCP_TRANSPORT","stdio") #"stdio" #streamable_http" #st
 MCP_SSE_HOST=os.getenv("MCP_SSE_HOST","0.0.0.0")
 MCP_SSE_PORT=os.getenv("MCP_SSE_PORT","8000")
 
-# ────────────────────────────────────────────────────────────────
-# Configure LangGraph Dev Server end point
-# ────────────────────────────────────────────────────────────────
-LANGRAPH_DEV = os.environ.get("LANGRAPH_DEV", "http://127.0.0.1:2024")
 
 
 

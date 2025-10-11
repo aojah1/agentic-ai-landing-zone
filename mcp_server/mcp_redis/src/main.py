@@ -24,14 +24,16 @@ class RedisMCPServer:
 
     # def run(self):
     #     mcp.run(transport=MCP_TRANSPORT)
+    # Build an ASGI app that serves the Streamable HTTP transport.
+    
+    def create_app(self):
+        return mcp.streamable_http_app()
 
     def run(self):
-        # Build an ASGI app that serves the Streamable HTTP transport.
-        # By default this app handles /mcp inside itself.
-        app = mcp.streamable_http_app()
+        
         # Run the ASGI app directly
         print(MCP_SSE_HOST)
-        uvicorn.run(app, host=MCP_SSE_HOST, port=int(MCP_SSE_PORT))
+        uvicorn.run(self.create_app(), host=MCP_SSE_HOST, port=int(MCP_SSE_PORT))
 
 if __name__ == "__main__":
     server = RedisMCPServer()

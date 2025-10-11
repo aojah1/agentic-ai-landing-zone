@@ -31,3 +31,14 @@ client/open_ai_agents/src/agents/research_bot/writer.py
 client/open_ai_agents/src/agents/research_bot/__pycache__/planner.cpython-313.pyc
 client/open_ai_agents/src/agents/research_bot/__pycache__/search.cpython-313.pyc
 client/open_ai_agents/src/agents/research_bot/__pycache__/writer.cpython-313.pyc
+mcp_server/mcp_redis/src/__pycache__/__init__.cpython-313.pyc
+mcp_server/mcp_redis/src/__pycache__/main.cpython-313.pyc
+mcp_server/mcp_redis/src/common/__pycache__/__init__.cpython-313.pyc
+mcp_server/mcp_redis/src/common/__pycache__/config.cpython-313.pyc
+mcp_server/mcp_redis/src/common/__pycache__/connection.cpython-313.pyc
+mcp_server/mcp_redis/src/common/__pycache__/server.cpython-313.pyc
+mcp_server/mcp_redis/src/tools/__pycache__/__init__.cpython-313.pyc
+mcp_server/mcp_redis/src/tools/__pycache__/dataframe.cpython-313.pyc
+mcp_server/mcp_redis/src/tools/__pycache__/hash.cpython-313.pyc
+mcp_server/mcp_redis/src/tools/__pycache__/server_management.cpython-313.pyc
+client/.DS_Store

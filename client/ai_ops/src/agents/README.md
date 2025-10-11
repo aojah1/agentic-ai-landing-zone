@@ -1,4 +1,4 @@
-## DEPLOYMENT OF A LOCAL ORACLE DB
+# DEPLOYMENT OF A LOCAL ORACLE DB
 
 ### 1) Is the VM even running?
 podman machine list
@@ -21,19 +21,10 @@ podman pull container-registry.oracle.com/database/free:latest
 ### 6)
 podman volume create oradata
 
-
-### 7) 
-podman run -d --name oracle-free \
-  -p 1521:1521 \
-  -v oradata:/opt/oracle/oradata \
-  -e ORACLE_PWD=Oracle_123 \
-  container-registry.oracle.com/database/free:latest
-
 ### ) Optional Step
 
 1. Check what’s running / existing
 podman ps -a | grep oracle-free
-
 
 That will show if the container is running or just stopped.
 
@@ -49,10 +40,17 @@ Remove it:
 podman rm oracle-free
 
 
-Then re-run your podman run ... --name oracle-free ....
+Then re-run your podman run ... --name oracle-free .... Step 7
+
+### 7) 
+podman run -d --name oracle-free \
+  -p 1521:1521 \
+  -v oradata:/opt/oracle/oradata \
+  -e ORACLE_PWD=Oracle_123 \
+  container-registry.oracle.com/database/free:latest
 
 ### 8) 
-podman logs -f oracle-free   # watch startup
+podman logs -f oracle-free   # watch startup, this may take longer time
 
 ### 9) Connect
 #### Default services: FREE (CDB) and FREEPDB1 (PDB). Example with SQL*Plus/SQLcl:
@@ -66,6 +64,7 @@ sql sys/Oracle_123@localhost:1521/FREEPDB1 as sysdba
 ### 10 ) Final step to enable MCP 
 conn -save demo_mcp_sys -savepwd sys/Oracle_123@localhost:1521/FREEPDB1 as sysdba
 
+--- ~/.sqlcl/connections.json ---
 
 # Connect to ADB using wallet
 > 

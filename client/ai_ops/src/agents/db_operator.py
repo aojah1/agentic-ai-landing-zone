@@ -5,249 +5,259 @@ Date: 2025-23-18
 =================================
 ==Oracle Database Operator==
 ==================================
-This agent integrates with Oracle DB SQLCl MCP Server, allowing NL conversation with any Oracle Database (19 c or higher).
+This agent integrates with Oracle DB SQLCl MCP Server, allowing NL conversation with any Oracle Database (19c or higher).
 https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html
-Workflow Overview:
-1. Load config and credentials from .env
-2. Start MCP clients for SQLCL
-3. Register tools with the agent
-4. Run the agent with user input and print response
 """
 
-import asyncio, os
+import os, asyncio, warnings
 from contextlib import AsyncExitStack
-from dotenv import load_dotenv
 from pathlib import Path
-from langchain_mcp_adapters.tools import load_mcp_tools
+
+warnings.filterwarnings("ignore")
+import matplotlib
+matplotlib.use("Agg")
+
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.agents import AgentFinish
+from langchain.agents import initialize_agent, AgentType
+from langchain_core.tools import StructuredTool
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from langchain_core.messages import HumanMessage
-# For OCI GenAI Service
-from langchain.agents import initialize_agent, Tool, AgentType
-from langchain_core.messages import AIMessage
-from src.llm.oci_ds_md import initialize_llm
+
+from langchain_mcp_adapters.tools import load_mcp_tools
+
+from src.llm.oci_genai import initialize_llm
 from src.prompt_engineering.topics.db_operator import promt_oracle_db_operator
 from src.tools.rag_agent import _rag_agent_service
 from src.tools.python_scratchpad import run_python
-from langchain_core.tools import tool
-from langchain_core.agents import AgentFinish
-import matplotlib
-matplotlib.use("Agg")
-import warnings
-warnings.filterwarnings("ignore")
-from src.common.config import *
+from src.common.config import *  # expects SQLCLI_MCP_PROFILE, FILE_SYSTEM_ACCESS_KEY, TAVILY_MCP_SERVER
 
-
-
+load_dotenv()
 
 # ────────────────────────────────────────────────────────
-# 2) Logic
+# 1) Model
 # ────────────────────────────────────────────────────────
-# ---------- Initialize a LLama model ----------
 model = initialize_llm()
 
-# ---------- server descriptors ----------
+# ────────────────────────────────────────────────────────
+# 2) MCP Server Descriptors
+# ────────────────────────────────────────────────────────
 adb_server = StdioServerParameters(
     command=SQLCLI_MCP_PROFILE, args=["-mcp"]
 )
 
-# Use npx
-local_file_server= StdioServerParameters(
+local_file_server = StdioServerParameters(
     command="npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", FILE_SYSTEM_ACCESS_KEY])
+    args=["-y", "@modelcontextprotocol/server-filesystem", FILE_SYSTEM_ACCESS_KEY],
+)
 
-# Use npx
 tavily_server = StdioServerParameters(
     command="npx",
-    args=["-y", "mcp-remote", TAVILY_MCP_SERVER])
+    args=["-y", "mcp-remote", TAVILY_MCP_SERVER],
+)
 
-# Global Auto-Approve flag (will be set dynamically)
-AUTO_APPROVE = 'N'  # Default to 'N'
+AUTO_APPROVE = 'N'  # default, toggled at runtime
 
-from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
-import asyncio
+
+# ────────────────────────────────────────────────────────
+# 3) Helpers
+# ────────────────────────────────────────────────────────
+async def safe_connect(name: str, params: StdioServerParameters, stack: AsyncExitStack,
+                       timeout: float = 15.0, retries: int = 1) -> ClientSession | None:
+    """
+    Connect+initialize a MCP session safely.
+    Returns ClientSession or None. Never raises.
+    """
+    attempt = 0
+    while attempt <= retries:
+        try:
+            # Enter the async *context manager* returned by stdio_client(...)
+            read, write = await asyncio.wait_for(
+                stack.enter_async_context(stdio_client(params)),
+                timeout=timeout
+            )
+
+            # Create session, then enter it as a context manager via the same stack
+            session = ClientSession(read, write)
+            session = await stack.enter_async_context(session)
+
+            await asyncio.wait_for(session.initialize(), timeout=timeout)
+
+            print(f"✅ Connected to MCP server: {name}")
+            return session
+        except Exception as e:
+            attempt += 1
+            if attempt <= retries:
+                print(f"⚠️  {name}: connect failed (attempt {attempt}/{retries}). Retrying… Reason: {e}")
+                await asyncio.sleep(1.5)
+            else:
+                print(f"❌ {name}: could not connect. Continuing without it. Reason: {e}")
+                return None
+
+
+
+def is_sql_tool(tool) -> bool:
+    nm = getattr(tool, "name", "") or ""
+    return any(kw in nm.lower() for kw in ("adb", "sql", "oracle"))
+
 
 class RunSQLInput(BaseModel):
     sql: str = Field(default="select sysdate from dual", description="The SQL query to execute.")
     model: str = Field(default="oci/generativeai-chat:2024-05-01", description="The name and version of the LLM (Large Language Model) you are using.")
-    sqlcl: str = Field(default="sqlcl", description="The name or path of the SQLcl MCP client.")  # Changed from mcp_client to sqlcl
+    sqlcl: str = Field(default="sqlcl", description="The name or path of the SQLcl MCP client.")
+
 
 def user_confirmed_tool(tool):
     async def wrapper(*args, **kwargs):
         try:
-            # Support raw string input or keyword arguments (from structured agent)
             if args and isinstance(args[0], str):
                 sql_query = args[0]
-                model = "oci/generativeai-chat:2024-05-01"
-                sqlcl_param = "sqlcl"  # Default
+                model_name = "oci/generativeai-chat:2024-05-01"
+                sqlcl_param = "sqlcl"
             else:
                 sql_query = kwargs.get("sql", "select sysdate from dual")
-                model = kwargs.get("model", "oci/generativeai-chat:2024-05-01")
-                sqlcl_param = kwargs.get("sqlcl", "sqlcl")  # Changed key to sqlcl
+                model_name = kwargs.get("model", "oci/generativeai-chat:2024-05-01")
+                sqlcl_param = kwargs.get("sqlcl", "sqlcl")
 
-            # Debug logging
-            print(f"DEBUG: Preparing payload - SQL: {sql_query}, Model: {model}, SQLCL: {sqlcl_param}")
+            print(f"DEBUG: Preparing payload - SQL: {sql_query}, Model: {model_name}, SQLCL: {sqlcl_param}")
 
-            if AUTO_APPROVE == 'Y':
-                approved = True
-            else:
-                print(f"\n\033[93mA SQL query is about to be executed by the agent:\033[0m")
-                print(f"\033[97m{sql_query}\033[0m")
-                confirmation = await asyncio.to_thread(input, "ALLOW this SQL execution? (y/n): ")
-                approved = confirmation.lower() in {'y', 'yes'}
+            approved = True if AUTO_APPROVE == 'Y' else (
+                (await asyncio.to_thread(input, "ALLOW this SQL execution? (y/n): ")).strip().lower() in {"y", "yes"}
+            )
 
-            if approved:
-                payload = {
-                    "sql": sql_query,
-                    "model": model,
-                    "sqlcl": sqlcl_param  # Changed key to sqlcl
-                }
-                try:
-                    if hasattr(tool, 'ainvoke'):
-                        return await tool.ainvoke(payload)
-                    elif hasattr(tool, 'invoke'):
-                        return tool.invoke(payload)
-                    else:
-                        return tool.run(**payload)
-                except Exception as e:
-                    return f"ERROR: Failed to execute SQLcl tool - {str(e)}\nIf 'sqlcl parameter is required', ensure SQLcl is installed and in PATH."
-            else:
+            if not approved:
                 return "⚠️ Execution cancelled by user."
+
+            payload = {"sql": sql_query, "model": model_name, "sqlcl": sqlcl_param}
+            try:
+                if hasattr(tool, 'ainvoke'):
+                    return await tool.ainvoke(payload)
+                if hasattr(tool, 'invoke'):
+                    return tool.invoke(payload)
+                return tool.run(**payload)
+            except Exception as e:
+                return f"ERROR: Failed to execute SQLcl tool - {e}\nIf 'sqlcl parameter is required', ensure SQLcl is installed and on PATH."
         except Exception as e:
             return f"ERROR: Wrapper failure: {e}"
+
     return StructuredTool(
         name=tool.name,
-        description=tool.description,
+        description=getattr(tool, "description", "SQL tool"),
         args_schema=RunSQLInput,
         coroutine=wrapper,
     )
 
 
+async def load_tools_from_session(name: str, session: ClientSession | None) -> list:
+    """
+    Load tools from a given MCP session safely.
+    One bad session won't block others.
+    """
+    if session is None:
+        return []
+    try:
+        tools = await load_mcp_tools(session)
+        print(f"🔧 {name}: loaded {len(tools)} tools")
+        return tools
+    except Exception as e:
+        print(f"❌ {name}: failed to load tools. Reason: {e}")
+        return []
 
+
+# ────────────────────────────────────────────────────────
+# 4) Main
+# ────────────────────────────────────────────────────────
 async def main() -> None:
     async with AsyncExitStack() as stack:
-        adb_session = None  # Default in case connection fails
+        # Connect independently; any can fail without stopping the app
+        adb_session = await safe_connect("Oracle SQLcl", adb_server, stack, timeout=20, retries=1)
+        tavily_session = await safe_connect("Tavily", tavily_server, stack, timeout=15, retries=1)
+        local_file_session = await safe_connect("Local File Server", local_file_server, stack, timeout=15, retries=1)
 
-        # Attempt SQLCL MCP connection
-        try:
-            adb_read, adb_write = await stack.enter_async_context(stdio_client(adb_server))
-            adb_session = await stack.enter_async_context(ClientSession(adb_read, adb_write))
-            await adb_session.initialize()
-        except Exception as conn_err:
-            print(f"\n❌ Could not connect to Oracle SQLCL MCP Server: {conn_err}")
-            print("⚠️  You can continue asking questions, but SQL tools will be unavailable.\n")
+        # Load tools per session; failures are isolated
+        all_tools = []
+        all_tools += await load_tools_from_session("Oracle SQLcl", adb_session)
+        all_tools += await load_tools_from_session("Tavily", tavily_session)
+        all_tools += await load_tools_from_session("Local File Server", local_file_session)
 
-        # Attempt Tavily MCP connection
-        try:
-            tavily_read, tavily_write = await stack.enter_async_context(stdio_client(tavily_server))
-            tavily_server_session = await stack.enter_async_context(ClientSession(tavily_read, tavily_write))
-            await tavily_server_session.initialize()
-        except Exception as tavily_conn_err:
-            print(f"\n❌ Could not connect to Tavily MCP Server: {tavily_conn_err}")
-            print("⚠️  You can continue asking questions, but Tavily tools will be unavailable.\n")
-
-        # Attempt Local File Server MCP connection
-        try:
-            local_file_read, local_file_write = await stack.enter_async_context(stdio_client(local_file_server))
-            local_file_session = await stack.enter_async_context(ClientSession(local_file_read, local_file_write))
-            await local_file_session.initialize()
-        except Exception as tavily_conn_err:
-            print(f"\n❌ Could not connect to Local File Server MCP Server: {tavily_conn_err}")
-            print("⚠️  You can continue asking questions, but Local File Server tools will be unavailable.\n")
-
-        try:
-            # Load tools
-            mcp_tools = []
-
-            # original_tools = [await load_mcp_tools(adb_session), await load_mcp_tools(tavily_server_session)]
-            if adb_session is not None:
-                mcp_tools.extend(await load_mcp_tools(adb_session))
-
-            if 'tavily_server_session' in locals() and tavily_server_session is not None:
-                mcp_tools.extend(await load_mcp_tools(tavily_server_session))
-
-            if 'local_file_session' in locals() and local_file_session is not None:
-                mcp_tools.extend(await load_mcp_tools(local_file_session))
-            
-            tools = []
-
-            def is_sql_tool(tool):
-                return any(kw in tool.name.lower() for kw in ["adb", "sql", "oracle"])
-
-            for t in mcp_tools:
+        # Wrap SQL tools with confirmation
+        final_tools = []
+        for t in all_tools:
+            try:
                 if is_sql_tool(t):
-                    wrapped = user_confirmed_tool(t)
-                    wrapped.name = t.name  # overwrite name so "run-sqlcl" matches
-                    tools.append(wrapped)
+                    final_tools.append(user_confirmed_tool(t))
                 else:
-                    tools.append(t)
+                    final_tools.append(t)
+            except Exception as e:
+                print(f"⚠️ Skipping tool due to wrap error: {getattr(t, 'name', '<unknown>')} -> {e}")
 
-            tools.append(run_python)  # Add your Python tool
-            tools.append(_rag_agent_service)  # Add your RAG tool
+        # Always add your local tools
+        final_tools.append(run_python)
+        final_tools.append(_rag_agent_service)
 
-            print(f"✅ Registered tools: {[t.name for t in tools]}")
+        print(f"✅ Registered tools: {[getattr(t, 'name', '<unnamed>') for t in final_tools]}")
 
-            # Prompt for auto-approval
-            global AUTO_APPROVE
-            print("Do you want to auto-approve all SQL executions without prompting each time? (y/n):")
-            confirmation = await asyncio.to_thread(input, "You: ")
-            AUTO_APPROVE = 'Y' if confirmation.lower() in {'y', 'yes'} else 'N'
+        # Prompt for auto-approve
+        global AUTO_APPROVE
+        try:
+            ans = (await asyncio.to_thread(input, "Auto-approve all SQL executions? (y/n): ")).strip().lower()
+            AUTO_APPROVE = 'Y' if ans in {"y", "yes"} else 'N'
+        except Exception:
+            AUTO_APPROVE = 'N'
 
-            # Initialize agent
-            agent = initialize_agent(
-                tools=tools,
-                llm=model,
-                agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-                handle_parsing_errors=True,
-                verbose=True,
-                agent_kwargs={"prefix": promt_oracle_db_operator},
-            )
+        # Build agent (works even if some servers are missing)
+        agent = initialize_agent(
+            tools=final_tools,
+            llm=model,
+            agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+            handle_parsing_errors=True,
+            verbose=True,
+            agent_kwargs={"prefix": promt_oracle_db_operator},
+        )
 
-            message_history = []
-            print("Type a question (empty / 'exit' to quit):")
-            while True:
-                user_input = await asyncio.to_thread(input, "You: ")
-                if user_input.strip().lower() in {"exit", "quit"}:
-                    print("👋  Bye!")
-                    break
+        # REPL
+        history: list = []
+        print("Type a question (empty / 'exit' to quit):")
+        while True:
+            user_input = await asyncio.to_thread(input, "You: ")
+            if not user_input or user_input.strip().lower() in {"exit", "quit"}:
+                print("👋 Bye!")
+                break
 
-                message_history.append(HumanMessage(content=user_input))
-                message_history = message_history[-30:]
+            history.append(HumanMessage(content=user_input))
+            history = history[-30:]
 
-                try:
-                    ai_response = await agent.ainvoke({"input": message_history})
+            try:
+                ai_response = await agent.ainvoke({"input": history})
 
-                    # Improved output extraction
-                    if isinstance(ai_response, dict):
-                        msg = ai_response.get("output")
-                    elif isinstance(ai_response, AgentFinish):
-                        # Handle AgentFinish: extract from return_values
-                        msg = ai_response.return_values.get("output")
-                    else:
-                        msg = ai_response  # Fallback for other types
+                # Normalize output
+                if isinstance(ai_response, dict):
+                    msg = ai_response.get("output")
+                elif isinstance(ai_response, AgentFinish):
+                    msg = ai_response.return_values.get("output")
+                else:
+                    msg = ai_response
 
-                    # Now process and print
-                    if isinstance(msg, AIMessage):
-                        message_history.append(msg)
-                        print(f"AI: {msg.content}\n")
-                    elif isinstance(msg, str):
-                        ai_msg = AIMessage(content=msg)
-                        message_history.append(ai_msg)
-                        print(f"AI: {msg}\n")
-                    elif isinstance(msg, dict) and "content" in msg:
-                        # Handle if it's a dict with 'content' (e.g., parsed Final Answer)
-                        ai_msg = AIMessage(content=msg.get("content", "<<no content>>"))
-                        message_history.append(ai_msg)
-                        print(f"AI: {ai_msg.content}\n")
-                    else:
-                        print("AI: <<no response>>\n")  # Only fallback if truly nothing
-                except Exception as agent_err:
-                    print(f"⚠️  Agent failed to respond: {agent_err}")
-        except Exception as final_err:
-            print(f"\n❌ Unhandled error: {final_err}")
+                if isinstance(msg, AIMessage):
+                    history.append(msg)
+                    print(f"AI: {msg.content}\n")
+                elif isinstance(msg, str):
+                    out = AIMessage(content=msg)
+                    history.append(out)
+                    print(f"AI: {msg}\n")
+                elif isinstance(msg, dict) and "content" in msg:
+                    out = AIMessage(content=msg["content"])
+                    history.append(out)
+                    print(f"AI: {out.content}\n")
+                else:
+                    print("AI: <<no response>>\n")
+            except Exception as e:
+                print(f"⚠️ Agent failed to respond: {e}")
 
 
 if __name__ == "__main__":
-    #grok()
     asyncio.run(main())
