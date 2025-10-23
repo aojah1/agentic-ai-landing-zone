@@ -47,7 +47,14 @@ FILE_SYSTEM_ACCESS_KEY=os.getenv("FILE_SYSTEM_ACCESS_KEY")
 # ────────────────────────────────────────────────────────────────
 MCP_TRANSPORT= os.getenv("MCP_TRANSPORT","stdio") #"stdio" #streamable_http" #stdio" #sse
 MCP_SSE_HOST=os.getenv("MCP_SSE_HOST","0.0.0.0")
-MCP_SSE_PORT=os.getenv("MCP_SSE_PORT","8000")
+MCP_SSE_PORT=os.getenv("MCP_SSE_PORT","8001")
+
+# ────────────────────────────────────────────────────────────────
+# Configure MCP Connections to SSE (Streamable HTTP) for DB TOOLS
+# ────────────────────────────────────────────────────────────────
+MCP_TRANSPORT_DBTOOLS= os.getenv("MCP_TRANSPORT_DBTOOLS","stdio") #"stdio" #streamable_http" #stdio" #sse
+MCP_SSE_HOST_DBTOOLS=os.getenv("MCP_SSE_HOST_DBTOOLS","0.0.0.0")
+MCP_SSE_PORT_DBTOOLS=os.getenv("MCP_SSE_PORT_DBTOOLS","8002")
 
 
 

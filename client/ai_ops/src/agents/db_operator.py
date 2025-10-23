@@ -35,6 +35,7 @@ from src.prompt_engineering.topics.db_operator import promt_oracle_db_operator
 from src.tools.rag_agent import _rag_agent_service
 from src.tools.python_scratchpad import run_python
 from src.common.config import *  # expects SQLCLI_MCP_PROFILE, FILE_SYSTEM_ACCESS_KEY, TAVILY_MCP_SERVER
+from src.utils.mcp_helper_connection import safe_connect
 
 load_dotenv()
 
@@ -44,7 +45,7 @@ load_dotenv()
 model = initialize_llm()
 
 # ────────────────────────────────────────────────────────
-# 2) MCP Server Descriptors
+# 2.1) MCP Server Descriptors for stdio protocol
 # ────────────────────────────────────────────────────────
 adb_server = StdioServerParameters(
     command=SQLCLI_MCP_PROFILE, args=["-mcp"]
@@ -60,45 +61,26 @@ tavily_server = StdioServerParameters(
     args=["-y", "mcp-remote", TAVILY_MCP_SERVER],
 )
 
-AUTO_APPROVE = 'N'  # default, toggled at runtime
+AUTO_APPROVE = 'N'  # default, toggled at runtimex
 
+
+# ────────────────────────────────────────────────────────
+# 2.2) MCP Server Descriptors for streamable-http protocol
+# ────────────────────────────────────────────────────────
+
+url_redis=f"{MCP_SSE_HOST}:{MCP_SSE_PORT}/mcp"
+print(url_redis)
+
+# ────────────────────────────────────────────────────────
+# 2.2) MCP Server Descriptors for streamable-http protocol for DB TOOLS
+# ────────────────────────────────────────────────────────
+
+url_dbtools=f"{MCP_SSE_HOST_DBTOOLS}:{MCP_SSE_PORT_DBTOOLS}/mcp"
+print(url_dbtools)
 
 # ────────────────────────────────────────────────────────
 # 3) Helpers
 # ────────────────────────────────────────────────────────
-async def safe_connect(name: str, params: StdioServerParameters, stack: AsyncExitStack,
-                       timeout: float = 15.0, retries: int = 1) -> ClientSession | None:
-    """
-    Connect+initialize a MCP session safely.
-    Returns ClientSession or None. Never raises.
-    """
-    attempt = 0
-    while attempt <= retries:
-        try:
-            # Enter the async *context manager* returned by stdio_client(...)
-            read, write = await asyncio.wait_for(
-                stack.enter_async_context(stdio_client(params)),
-                timeout=timeout
-            )
-
-            # Create session, then enter it as a context manager via the same stack
-            session = ClientSession(read, write)
-            session = await stack.enter_async_context(session)
-
-            await asyncio.wait_for(session.initialize(), timeout=timeout)
-
-            print(f"✅ Connected to MCP server: {name}")
-            return session
-        except Exception as e:
-            attempt += 1
-            if attempt <= retries:
-                print(f"⚠️  {name}: connect failed (attempt {attempt}/{retries}). Retrying… Reason: {e}")
-                await asyncio.sleep(1.5)
-            else:
-                print(f"❌ {name}: could not connect. Continuing without it. Reason: {e}")
-                return None
-
-
 
 def is_sql_tool(tool) -> bool:
     nm = getattr(tool, "name", "") or ""
@@ -173,16 +155,26 @@ async def load_tools_from_session(name: str, session: ClientSession | None) -> l
 # ────────────────────────────────────────────────────────
 async def main() -> None:
     async with AsyncExitStack() as stack:
-        # Connect independently; any can fail without stopping the app
-        adb_session = await safe_connect("Oracle SQLcl", adb_server, stack, timeout=20, retries=1)
-        tavily_session = await safe_connect("Tavily", tavily_server, stack, timeout=15, retries=1)
-        local_file_session = await safe_connect("Local File Server", local_file_server, stack, timeout=15, retries=1)
+         # Connect to stdio servers using the shared stack
+        adb_session   = await safe_connect("Oracle SQLcl", adb_server, stack, timeout=20, retries=1)
+        tavily_session= await safe_connect("Tavily", tavily_server, stack, timeout=15, retries=1)
+        local_session = await safe_connect("Local File Server", local_file_server, stack, timeout=15, retries=1)
 
-        # Load tools per session; failures are isolated
+        # Connect the streamable Redis server on the same stack
+        redis_session  = await safe_connect("redis", url_redis, stack, timeout=20, retries=1, http_streamable=True)
+
+        # Connect the streamable DB Tools server on the same stack
+        dbtools_session  = await safe_connect("dbtools", url_dbtools, stack, timeout=20, retries=1, http_streamable=True)
+
+
+        # Now load tools as before; if redis_session is None you simply get an empty list
         all_tools = []
         all_tools += await load_tools_from_session("Oracle SQLcl", adb_session)
         all_tools += await load_tools_from_session("Tavily", tavily_session)
-        all_tools += await load_tools_from_session("Local File Server", local_file_session)
+        all_tools += await load_tools_from_session("Local File Server", local_session)
+        all_tools += await load_tools_from_session("redis", redis_session)
+        all_tools += await load_tools_from_session("dbtools", dbtools_session)
+
 
         # Wrap SQL tools with confirmation
         final_tools = []
@@ -219,6 +211,7 @@ async def main() -> None:
             agent_kwargs={"prefix": promt_oracle_db_operator},
         )
 
+
         # REPL
         history: list = []
         print("Type a question (empty / 'exit' to quit):")
@@ -229,35 +222,53 @@ async def main() -> None:
                 break
 
             history.append(HumanMessage(content=user_input))
-            history = history[-30:]
+            history = history[-30:] #### Short Term Memory
 
             try:
+                #await agent.ainvoke({f"store this data in redis cache using hset tool : {history}", 101})
                 ai_response = await agent.ainvoke({"input": history})
-
+                
+                
                 # Normalize output
-                if isinstance(ai_response, dict):
-                    msg = ai_response.get("output")
-                elif isinstance(ai_response, AgentFinish):
-                    msg = ai_response.return_values.get("output")
-                else:
-                    msg = ai_response
+                eval_msg = normalize_output(ai_response, history)
 
-                if isinstance(msg, AIMessage):
-                    history.append(msg)
-                    print(f"AI: {msg.content}\n")
-                elif isinstance(msg, str):
-                    out = AIMessage(content=msg)
-                    history.append(out)
-                    print(f"AI: {msg}\n")
-                elif isinstance(msg, dict) and "content" in msg:
-                    out = AIMessage(content=msg["content"])
-                    history.append(out)
-                    print(f"AI: {out.content}\n")
-                else:
-                    print("AI: <<no response>>\n")
+                ### Log data for Eval (Long Term Memory)
+                #await agent.ainvoke({"input" : f"Store a key in Redis: set hash `user:aojah1` with field {user_input} and value {eval_msg} using the hset tool. Set expiry to 7 days. Try it 1 time only."})
+
             except Exception as e:
                 print(f"⚠️ Agent failed to respond: {e}")
 
+# Normalize output
+def normalize_output(ai_response, history):
+    
+    
+    if isinstance(ai_response, dict):
+        msg = ai_response.get("output")
+    elif isinstance(ai_response, AgentFinish):
+        msg = ai_response.return_values.get("output")
+    else:
+        msg = ai_response
+
+    eval_msg=""
+    if isinstance(msg, AIMessage):
+        history.append(msg)
+        eval_msg= f"AI: {msg.content}\n"
+        print(eval_msg)
+    elif isinstance(msg, str):
+        out = AIMessage(content=msg)
+        history.append(out)
+        eval_msg= f"AI: {msg}\n"
+        print(eval_msg)
+    elif isinstance(msg, dict) and "content" in msg:
+        out = AIMessage(content=msg["content"])
+        history.append(out)
+        eval_msg= f"AI: {out.content}\n"
+        print(eval_msg)
+    else:
+        eval_msg= "AI: <<no response>>\n"
+        print(eval_msg)
+
+    return eval_msg
 
 if __name__ == "__main__":
     asyncio.run(main())

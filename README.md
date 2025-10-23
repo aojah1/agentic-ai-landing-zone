@@ -66,7 +66,13 @@ How to actually get Python 3.13 on macOS (change it for your machine)
 ## Client Library
     cd client
 
+    https://github.com/aojah1/agentic-ai-landing-zone/tree/main/client
+
 ### MCP Server - 
+
+    cd mcp_server
+
+    https://github.com/aojah1/agentic-ai-landing-zone/tree/main/mcp_server
 
 #### The Model Context Protocol (MCP) 
 
