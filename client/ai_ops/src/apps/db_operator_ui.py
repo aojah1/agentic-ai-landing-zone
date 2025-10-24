@@ -23,48 +23,99 @@ from src.common.config import *
 from src.utils.mcp_helper_connection import safe_connect
 
 from langchain.callbacks.base import BaseCallbackHandler
+import time, html, json
 
 class ReactLogHandler(BaseCallbackHandler):
-    """Stream real-time chain-of-thought logs to the log queue."""
+    """Stream real-time logs to a queue; resilient to None/variant payloads."""
     def __init__(self, log_q):
         self.log_q = log_q
 
-    def _push(self, prefix, msg, emoji="💭"):
-        ts = time.strftime('%H:%M:%S')
-        self.log_q.put(f"[{ts}] {emoji} {prefix}: {msg}")
+    # -------- helpers --------
+    def _ts(self):
+        return time.strftime('%H:%M:%S')
 
-    # ========== AGENT LIFE CYCLE ========== #
+    def _emit(self, emoji: str, prefix: str, msg: str):
+        try:
+            safe = msg if isinstance(msg, str) else json.dumps(msg, ensure_ascii=False)
+        except Exception:
+            safe = str(msg)
+        self.log_q.put(f"[{self._ts()}] {emoji} {prefix}: {safe}")
+
+    def _name_from_serialized(self, serialized):
+        # serialized can be None, str, dict, tuple...
+        try:
+            if isinstance(serialized, dict):
+                # langchain often passes {"name": "..."} OR {"id": ["chain", "AgentExecutor"]}
+                if "name" in serialized and isinstance(serialized["name"], str):
+                    return serialized["name"]
+                if "id" in serialized:
+                    sid = serialized["id"]
+                    if isinstance(sid, (list, tuple)) and sid:
+                        return ".".join(map(str, sid))
+                    return str(sid)
+                return json.dumps(serialized, ensure_ascii=False)[:120]
+            if isinstance(serialized, (list, tuple)):
+                return ".".join(map(str, serialized))
+            if serialized is None:
+                return "Unknown"
+            return str(serialized)
+        except Exception:
+            return "Unknown"
+
+    # -------- chain lifecycle --------
     def on_chain_start(self, serialized, inputs, **kwargs):
-        name = serialized.get("name", "Chain")
-        self._push("Chain Start", f"{name} | Inputs: {inputs}", emoji="🔗")
-
-    def on_llm_start(self, serialized, prompts, **kwargs):
-        for p in prompts:
-            self._push("LLM Prompt", p.strip(), emoji="🧠")
-
-    def on_tool_start(self, serialized, input_str, **kwargs):
-        tool_name = serialized.get("name", "Unknown Tool")
-        self._push("Action", f"{tool_name} | Input: {input_str}", emoji="🧩")
-
-    def on_tool_end(self, output, **kwargs):
-        self._push("Observation", str(output)[:500], emoji="👁️")
-
-    def on_llm_end(self, response, **kwargs):
-        if response and hasattr(response, "generations"):
-            text = response.generations[0][0].text[:400]
-            self._push("LLM Response", text, emoji="💡")
+        name = self._name_from_serialized(serialized)
+        # inputs can be dict/str/None
+        self._emit("🔗", "Chain Start", {"name": name, "inputs": inputs})
 
     def on_chain_end(self, outputs, **kwargs):
-        self._push("Chain End", f"Outputs: {outputs}", emoji="✅")
-
-    def on_agent_action(self, action, **kwargs):
-        self._push("Agent Action", str(action.log).strip()[:500], emoji="⚙️")
-
-    def on_agent_finish(self, finish, **kwargs):
-        self._push("Final Answer", finish.return_values.get("output", ""), emoji="🎯")
+        self._emit("✅", "Chain End", outputs)
 
     def on_error(self, error, **kwargs):
-        self._push("Error", str(error), emoji="💥")
+        self._emit("💥", "Error", str(error))
+
+    # -------- llm --------
+    def on_llm_start(self, serialized, prompts, **kwargs):
+        name = self._name_from_serialized(serialized)
+        if isinstance(prompts, (list, tuple)):
+            for p in prompts:
+                self._emit("🧠", f"LLM Prompt ({name})", p)
+        else:
+            self._emit("🧠", f"LLM Prompt ({name})", prompts)
+
+    def on_llm_end(self, response, **kwargs):
+        # response.generations can be missing/empty
+        text = None
+        try:
+            gens = getattr(response, "generations", None)
+            if gens and len(gens) and len(gens[0]) and getattr(gens[0][0], "text", None):
+                text = gens[0][0].text
+        except Exception:
+            pass
+        self._emit("💡", "LLM Response", text or "<no generations>")
+
+    # -------- tools --------
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        name = self._name_from_serialized(serialized)
+        # input_str may be dict/str/None
+        self._emit("🧩", f"Action: {name}", input_str)
+
+    def on_tool_end(self, output, **kwargs):
+        self._emit("👁️", "Observation", output)
+
+    # -------- agent --------
+    def on_agent_action(self, action, **kwargs):
+        # action.log may be None
+        log_text = getattr(action, "log", None)
+        self._emit("⚙️", "Agent Action", log_text or str(action))
+
+    def on_agent_finish(self, finish, **kwargs):
+        try:
+            val = getattr(finish, "return_values", {}) or {}
+        except Exception:
+            val = {}
+        self._emit("🎯", "Final Answer", val.get("output") or val)
+
 
 
 # ─────────────────────────────────────────────
@@ -132,6 +183,51 @@ def normalize_output(ai_response, history):
         history.append(AIMessage(content=msg["content"]))
         return msg["content"]
     return "<<no response>>"
+
+
+import re, html
+
+# Hide internal traces (Thought/Action/Observation/etc.) from the AI panel
+def _clean_ai_text(text: str) -> str:
+    if not text:
+        return ""
+    keep = []
+    for line in text.splitlines():
+        if re.match(r'^\s*(Thought|Action|Observation|Agent Action|Tool|Reasoning)\b', line, re.I):
+            continue
+        keep.append(line)
+    out = "\n".join(keep).strip()
+    # If there's an explicit "Final Answer:" label, surface just that portion
+    m = re.search(r'(?is)Final Answer:\s*(.+)$', out)
+    return m.group(1).strip() if m else out
+
+# Minimal markdown→HTML safe-ish rendering:
+# - escape HTML
+# - support ``` code fences
+# - preserve newlines
+def _md_to_html(md_text: str) -> str:
+    if not md_text:
+        return ""
+    # Escape first
+    esc = html.escape(md_text)
+
+    # Restore fenced code blocks to <pre><code>...</code></pre>
+    def repl(m):
+        code = m.group(2)
+        return f"<pre style='margin:8px 0;padding:10px;background:#0d0d0d;border-radius:6px;overflow:auto;'><code>{html.escape(code)}</code></pre>"
+
+    esc = re.sub(r"```(\w+)?\n(.*?)```", repl, esc, flags=re.S)
+
+    # Inline code `...`
+    esc = re.sub(r"`([^`]+)`", r"<code style='background:#0d0d0d;padding:2px 4px;border-radius:4px;'>\1</code>", esc)
+
+    # Basic bullets
+    esc = re.sub(r"(?m)^- (.+)$", r"• \1", esc)
+
+    # Newlines → <br>
+    esc = esc.replace("\n", "<br>")
+    return esc
+
 
 # ─────────────────────────────────────────────
 # ASYNC AGENT LOOP
@@ -230,18 +326,39 @@ def start_agent_thread(auto_approve):
     _global_state.threads["agent"] = t
 
 def start_log_stream():
+    """Ultra-low latency log pump: blocks on .get() and never sleeps."""
     if "stream" in _global_state.threads and _global_state.threads["stream"].is_alive():
         return
+
+    # Optional cap to avoid unbounded growth
+    MAX_LOGS = 5000
+
     def pump():
         while not _global_state.stop_flag["stop"]:
             try:
-                msg = _global_state.log_q.get(timeout=0.5)
+                # Block briefly for new log; as soon as one arrives, drain the rest
+                msg = _global_state.log_q.get(timeout=0.2)
                 _global_state.trace_logs.append(msg)
+
+                # Drain burst without sleeping
+                while True:
+                    try:
+                        _global_state.trace_logs.append(_global_state.log_q.get_nowait())
+                    except queue.Empty:
+                        break
+
+                # Trim if over cap
+                if len(_global_state.trace_logs) > MAX_LOGS:
+                    del _global_state.trace_logs[: len(_global_state.trace_logs) - MAX_LOGS]
+
             except queue.Empty:
+                # no log this tick; loop back immediately
                 continue
+
     t = threading.Thread(target=pump, daemon=True)
     t.start()
     _global_state.threads["stream"] = t
+
 
 # ─────────────────────────────────────────────
 # STREAMLIT UI — ChatGPT style
@@ -252,9 +369,11 @@ def main():
     st.title("Oracle DB Operator 💬")
     st.caption("Conversational Agent for Oracle MCP Servers")
 
-    # Track busy state (used to pause any optional auto-refresh logic you might add)
+    # Flags
     if "busy" not in st.session_state:
         st.session_state.busy = False
+    if "suppress_refresh" not in st.session_state:
+        st.session_state.suppress_refresh = False
 
     auto_approve = st.sidebar.checkbox("Auto-approve SQL executions", value=False)
     agent_running = (
@@ -265,7 +384,6 @@ def main():
 
     col1, col2 = st.sidebar.columns(2)
     if col1.button("▶️ Start Agent"):
-        # Seed an immediate log line so panel shows something right away
         _global_state.trace_logs.append(f"[{time.strftime('%H:%M:%S')}] 🚀 Starting MCP Agent…")
 
         with st.spinner("Starting MCP Agent..."):
@@ -273,7 +391,7 @@ def main():
             start_log_stream()
             st.success("✅ Agent started")
 
-        # Drain initial logs briefly so they render on the same click
+        # Quick drain so init logs show immediately
         start_deadline = time.time() + 1.0
         while time.time() < start_deadline:
             drained = False
@@ -285,43 +403,29 @@ def main():
                 pass
             if not drained:
                 time.sleep(0.05)
-
         st.rerun()
 
     if col2.button("🛑 Stop Agent"):
         _global_state.stop_flag["stop"] = True
         st.warning("Stopping agent...")
 
-    # Persistent chat history
+    # Chat history
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    # ───────────── LOGS AT TOP (dark, native) ─────────────
+    # ───────────── LIVE LOGS (TOP) ─────────────
     st.subheader("📜 Agent Logs (Live)")
-
     if st.button("🧹 Clear Logs"):
         _global_state.trace_logs.clear()
 
-    # Background collector to move log_q → trace_logs (idempotent)
-    def collect_logs():
-        while not _global_state.stop_flag["stop"]:
-            try:
-                while not _global_state.log_q.empty():
-                    _global_state.trace_logs.append(_global_state.log_q.get_nowait())
-            except queue.Empty:
-                pass
-            time.sleep(0.2)
+    # Drain any pending logs before rendering
+    try:
+        while not _global_state.log_q.empty():
+            _global_state.trace_logs.append(_global_state.log_q.get_nowait())
+    except queue.Empty:
+        pass
 
-    if (
-        "log_collector" not in _global_state.threads
-        or not _global_state.threads["log_collector"].is_alive()
-    ):
-        t = threading.Thread(target=collect_logs, daemon=True)
-        t.start()
-        _global_state.threads["log_collector"] = t
-
-    # Render logs (dark block)
-    log_text = "\n".join(_global_state.trace_logs[-1200:]) or "No logs yet..."
+    log_text = "\n".join(_global_state.trace_logs[-1500:]) or "No logs yet..."
     st.markdown(
         f"""
         <div style="background-color:#111; color:#EEE; padding:10px;
@@ -334,26 +438,35 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ───────────── CONVERSATION (scrollable) ─────────────
+        # ───────────── CONVERSATION (SCROLLABLE, DARK, CLEAN) ─────────────
     st.markdown("---")
     st.markdown("### 💬 Conversation")
 
-    chat_html = ""
+    chat_html = []
     for role, content in st.session_state.chat_history:
-        bg = "#2a2a2a" if role == "user" else "#1e1e1e"
-        fg = "#fff" if role == "user" else "#9CDCFE"
-        prefix = "👤 You:" if role == "user" else "🤖 AI:"
-        chat_html += f"""
-        <div style='background:{bg};color:{fg};padding:10px;border-radius:8px;margin-bottom:8px;'>
-            <b>{prefix}</b><br>{content}
-        </div>"""
+        if role == "user":
+            safe_body = _md_to_html(str(content))  # user input as-is (escaped)
+            bubble = (
+                f"<div style='background:#2a2a2a;color:#ffffff;"
+                f"padding:10px;border-radius:8px;margin-bottom:8px;'>"
+                f"<b>👤 You:</b><br>{safe_body}</div>"
+            )
+        else:
+            # Clean out Thought/Action/Observation noise from AI text
+            cleaned = _clean_ai_text(str(content))
+            safe_body = _md_to_html(cleaned)
+            bubble = (
+                f"<div style='background:#1e1e1e;color:#9CDCFE;"
+                f"padding:10px;border-radius:8px;margin-bottom:8px;'>"
+                f"<b>🤖 AI:</b><br>{safe_body}</div>"
+            )
+        chat_html.append(bubble)
 
-    # Scrollable container WITH auto-scroll to the bottom
     st.markdown(
         f"""
         <div id="chatbox" style="background:#111; padding:10px; border-radius:8px;
              height:400px; overflow-y:auto;">
-            {chat_html or '<i>No conversation yet...</i>'}
+            {''.join(chat_html) or '<i>No conversation yet...</i>'}
         </div>
         <script>
         var cb = document.getElementById('chatbox');
@@ -363,39 +476,64 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ───────────── INPUT + SINGLE-CLICK RUN FIX ─────────────
-    user_query = st.text_area(
-        "💬 Ask your question:",
-        placeholder="Type your SQL or question here...",
-        key="chat_input",
-        height=80,
-    )
 
-    # Click stores the query in state; processing happens after rerun (below)
-    run_clicked = st.button("🚀 Run", use_container_width=True, key="run_btn")
-    if run_clicked and user_query.strip():
-        st.session_state["pending_query"] = user_query
+        # ───────────── INPUT (single-click form, clear after submit, thinking above) ─────────────
+    # Status line ABOVE the Run button
+    status_ph = st.empty()
 
-    # ───────────── PROCESS PENDING QUERY (single-click behavior) ─────────────
-    if "pending_query" in st.session_state and not st.session_state.busy:
-        pq = st.session_state.pop("pending_query")
+    with st.form("chat_form", clear_on_submit=False):
+        user_query = st.text_area(
+            "💬 Ask your question:",
+            placeholder="Type your SQL or question here...",
+            key="chat_input",
+            height=80,
+        )
+        submitted = st.form_submit_button("🚀 Run", use_container_width=True)
 
-        if not ("agent" in _global_state.threads and _global_state.threads["agent"].is_alive()):
+    if submitted:
+        q = (user_query or "").strip()
+        if not q:
+            st.warning("Please enter a question.")
+        elif not ("agent" in _global_state.threads and _global_state.threads["agent"].is_alive()):
             st.error("Agent not running. Please start it first.")
         else:
-            _global_state.prompt_q.put(pq)
-            st.session_state.chat_history.append(("user", pq))
+            # Show thinking indicator ABOVE the button
+            status_ph.markdown(
+                "<div style='margin-bottom:6px;color:#9CDCFE;'>🤖 <em>Thinking…</em></div>",
+                unsafe_allow_html=True,
+            )
+
+            # Pause any auto-refresh (if you use it elsewhere)
             st.session_state.busy = True
 
-            with st.spinner("🤖 Thinking..."):
-                try:
-                    reply = _global_state.response_q.get(timeout=120)
-                    st.session_state.chat_history.append(("ai", reply))
-                    st.success("✅ Response received!")
-                except queue.Empty:
-                    st.error("⏱️ Timeout waiting for agent response.")
-            st.session_state.busy = False
-            st.rerun()
+            # Enqueue + reflect in chat immediately
+            _global_state.prompt_q.put(q)
+            st.session_state.chat_history.append(("user", q))
+
+            # Wait for the agent reply
+            try:
+                reply = _global_state.response_q.get(timeout=120)
+                st.session_state.chat_history.append(("ai", reply))
+                # Clear the textarea AFTER successful processing
+                st.session_state.chat_input = ""
+            except queue.Empty:
+                st.error("⏱️ Timeout waiting for agent response.")
+            finally:
+                st.session_state.busy = False
+                status_ph.empty()  # remove the thinking line
+                st.rerun()
+
+
+    # ───────────── AUTO-REFRESH FOR LIVE LOGS (moved to the very end) ─────────────
+    # Only refresh when: not busy AND not in/just after form submit handling.
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        if not st.session_state.busy and not st.session_state.suppress_refresh:
+            st_autorefresh(interval=120, key="live_log_refresh")
+    except Exception:
+        pass
+
+
 
 
 
