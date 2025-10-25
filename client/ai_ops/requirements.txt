@@ -23,3 +23,5 @@ httpx>=0.27
 plotly
 matplotlib
 #geopandas
+streamlit
+streamlit-autorefresh
