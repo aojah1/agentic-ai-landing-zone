@@ -369,31 +369,33 @@ def main():
     st.title("Oracle DB Operator 💬")
     st.caption("Conversational Agent for Oracle MCP Servers")
 
-    # Flags
-    if "busy" not in st.session_state:
-        st.session_state.busy = False
-    if "suppress_refresh" not in st.session_state:
-        st.session_state.suppress_refresh = False
+    # ---------- Session ----------
+    ss = st.session_state
+    ss.setdefault("busy", False)
+    ss.setdefault("suppress_refresh", False)
+    ss.setdefault("chat_history", [])
+    ss.setdefault("chat_input", "")
+    ss.setdefault("pending_response", False)  # New: Track if waiting for AI reply
+
+    # Clear textarea state BEFORE the widget is created (set last turn)
+    if ss.get("_clear_chat_input", False):
+        ss._clear_chat_input = False
+        ss.pop("chat_input", None)
 
     auto_approve = st.sidebar.checkbox("Auto-approve SQL executions", value=False)
-    agent_running = (
-        "agent" in _global_state.threads
-        and _global_state.threads["agent"].is_alive()
-    )
+    agent_running = ("agent" in _global_state.threads) and _global_state.threads["agent"].is_alive()
     st.sidebar.markdown(f"**Status:** {'🟢 Running' if agent_running else '🔴 Stopped'}")
 
-    col1, col2 = st.sidebar.columns(2)
-    if col1.button("▶️ Start Agent"):
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("▶️ Start Agent"):
         _global_state.trace_logs.append(f"[{time.strftime('%H:%M:%S')}] 🚀 Starting MCP Agent…")
-
         with st.spinner("Starting MCP Agent..."):
             start_agent_thread(auto_approve)
             start_log_stream()
             st.success("✅ Agent started")
-
-        # Quick drain so init logs show immediately
-        start_deadline = time.time() + 1.0
-        while time.time() < start_deadline:
+        # drain initial logs briefly
+        t_end = time.time() + 1.0
+        while time.time() < t_end:
             drained = False
             try:
                 while not _global_state.log_q.empty():
@@ -405,20 +407,15 @@ def main():
                 time.sleep(0.05)
         st.rerun()
 
-    if col2.button("🛑 Stop Agent"):
+    if c2.button("🛑 Stop Agent"):
         _global_state.stop_flag["stop"] = True
         st.warning("Stopping agent...")
 
-    # Chat history
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    # ───────────── LIVE LOGS (TOP) ─────────────
+    # ---------- Logs ----------
     st.subheader("📜 Agent Logs (Live)")
     if st.button("🧹 Clear Logs"):
         _global_state.trace_logs.clear()
 
-    # Drain any pending logs before rendering
     try:
         while not _global_state.log_q.empty():
             _global_state.trace_logs.append(_global_state.log_q.get_nowait())
@@ -430,7 +427,7 @@ def main():
         f"""
         <div style="background-color:#111; color:#EEE; padding:10px;
              border-radius:8px; height:300px; overflow-y:auto;
-             font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+             font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace;
              font-size:13px; line-height:1.35;">
             {log_text.replace('\n', '<br>')}
         </div>
@@ -438,48 +435,51 @@ def main():
         unsafe_allow_html=True,
     )
 
-        # ───────────── CONVERSATION (SCROLLABLE, DARK, CLEAN) ─────────────
+    # ---------- Conversation (render via placeholder) ----------
     st.markdown("---")
     st.markdown("### 💬 Conversation")
+    chat_ph = st.empty()
 
-    chat_html = []
-    for role, content in st.session_state.chat_history:
-        if role == "user":
-            safe_body = _md_to_html(str(content))  # user input as-is (escaped)
-            bubble = (
-                f"<div style='background:#2a2a2a;color:#ffffff;"
-                f"padding:10px;border-radius:8px;margin-bottom:8px;'>"
-                f"<b>👤 You:</b><br>{safe_body}</div>"
-            )
-        else:
-            # Clean out Thought/Action/Observation noise from AI text
-            cleaned = _clean_ai_text(str(content))
-            safe_body = _md_to_html(cleaned)
-            bubble = (
-                f"<div style='background:#1e1e1e;color:#9CDCFE;"
-                f"padding:10px;border-radius:8px;margin-bottom:8px;'>"
-                f"<b>🤖 AI:</b><br>{safe_body}</div>"
-            )
-        chat_html.append(bubble)
+    def render_chat():
+        bubbles = []
+        for role, content in ss.chat_history:
+            if role == "user":
+                safe = _md_to_html(str(content))
+                bubbles.append(
+                    f"<div style='background:#2a2a2a;color:#fff;padding:10px;border-radius:8px;margin-bottom:8px;'>"
+                    f"<b>👤 You:</b><br>{safe}</div>"
+                )
+            else:
+                cleaned = _clean_ai_text(str(content))
+                safe = _md_to_html(cleaned)
+                bubbles.append(
+                    f"<div style='background:#1e1e1e;color:#9CDCFE;padding:10px;border-radius:8px;margin-bottom:8px;'>"
+                    f"<b>🤖 AI:</b><br>{safe}</div>"
+                )
+        chat_ph.markdown(
+            f"""
+            <div id="chatbox" style="background:#111; padding:10px; border-radius:8px; height:400px; overflow-y:auto;">
+                {''.join(bubbles) or '<i>No conversation yet...</i>'}
+            </div>
+            <script>
+            var cb = document.getElementById('chatbox');
+            if (cb) {{ cb.scrollTop = cb.scrollHeight; }}
+            </script>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    st.markdown(
-        f"""
-        <div id="chatbox" style="background:#111; padding:10px; border-radius:8px;
-             height:400px; overflow-y:auto;">
-            {''.join(chat_html) or '<i>No conversation yet...</i>'}
-        </div>
-        <script>
-        var cb = document.getElementById('chatbox');
-        if (cb) {{ cb.scrollTop = cb.scrollHeight; }}
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+    render_chat()
 
+    # ---------- Input (single-click submit) ----------
+    status_ph = st.empty()  # thinking line above button
 
-        # ───────────── INPUT (single-click form, clear after submit, thinking above) ─────────────
-    # Status line ABOVE the Run button
-    status_ph = st.empty()
+    # Show "thinking" if a response is pending
+    if ss.pending_response:
+        status_ph.markdown(
+            "<div style='margin-bottom:6px;color:#9CDCFE;'>🤖 <em>Thinking…</em></div>",
+            unsafe_allow_html=True,
+        )
 
     with st.form("chat_form", clear_on_submit=False):
         user_query = st.text_area(
@@ -492,51 +492,46 @@ def main():
 
     if submitted:
         q = (user_query or "").strip()
+        agent_running_now = ("agent" in _global_state.threads) and _global_state.threads["agent"].is_alive()
+
         if not q:
             st.warning("Please enter a question.")
-        elif not ("agent" in _global_state.threads and _global_state.threads["agent"].is_alive()):
+        elif not agent_running_now:
             st.error("Agent not running. Please start it first.")
         else:
-            # Show thinking indicator ABOVE the button
+            # Enqueue the prompt
+            _global_state.prompt_q.put(q)
+            # Append user message to history
+            ss.chat_history.append(("user", q))
+            # Set pending flag and thinking status
+            ss.pending_response = True
             status_ph.markdown(
                 "<div style='margin-bottom:6px;color:#9CDCFE;'>🤖 <em>Thinking…</em></div>",
                 unsafe_allow_html=True,
             )
+            # Clear textarea and rerun
+            ss._clear_chat_input = True
+            st.rerun()
 
-            # Pause any auto-refresh (if you use it elsewhere)
-            st.session_state.busy = True
+    # ---------- Check for AI response (on every rerun) ----------
+    if ss.pending_response:
+        try:
+            reply = _global_state.response_q.get_nowait()
+            ss.chat_history.append(("ai", reply))
+            ss.pending_response = False  # Clear pending flag
+            status_ph.empty()  # Clear thinking status
+            render_chat()  # Update chat immediately
+            st.rerun()  # Rerun to ensure UI updates
+        except queue.Empty:
+            pass  # No response yet; continue
 
-            # Enqueue + reflect in chat immediately
-            _global_state.prompt_q.put(q)
-            st.session_state.chat_history.append(("user", q))
-
-            # Wait for the agent reply
-            try:
-                reply = _global_state.response_q.get(timeout=120)
-                st.session_state.chat_history.append(("ai", reply))
-                # Clear the textarea AFTER successful processing
-                st.session_state.chat_input = ""
-            except queue.Empty:
-                st.error("⏱️ Timeout waiting for agent response.")
-            finally:
-                st.session_state.busy = False
-                status_ph.empty()  # remove the thinking line
-                st.rerun()
-
-
-    # ───────────── AUTO-REFRESH FOR LIVE LOGS (moved to the very end) ─────────────
-    # Only refresh when: not busy AND not in/just after form submit handling.
+    # ---------- Auto-refresh logs ----------
     try:
         from streamlit_autorefresh import st_autorefresh
-        if not st.session_state.busy and not st.session_state.suppress_refresh:
+        if not ss.busy and not ss.suppress_refresh:
             st_autorefresh(interval=120, key="live_log_refresh")
     except Exception:
         pass
-
-
-
-
-
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     main()
