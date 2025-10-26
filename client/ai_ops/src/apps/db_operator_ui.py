@@ -4,6 +4,7 @@ import threading
 import queue
 import time
 from contextlib import AsyncExitStack
+import concurrent.futures
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ from src.utils.mcp_helper_connection import safe_connect
 
 from langchain.callbacks.base import BaseCallbackHandler
 import time, html, json
+
 
 class ReactLogHandler(BaseCallbackHandler):
     """Stream real-time logs to a queue; resilient to None/variant payloads."""
@@ -117,7 +119,6 @@ class ReactLogHandler(BaseCallbackHandler):
         self._emit("🎯", "Final Answer", val.get("output") or val)
 
 
-
 # ─────────────────────────────────────────────
 # GLOBAL STATE (persistent across reruns)
 # ─────────────────────────────────────────────
@@ -129,6 +130,7 @@ class GlobalState:
         self.stop_flag = {"stop": False}
         self.trace_logs = []
         self.threads = {}
+        self.pending_approvals = {}  # sql -> {"original_tool": tool, "payload": payload, "future": future}
 
 if "global_state" not in st.session_state:
     st.session_state.global_state = GlobalState()
@@ -149,22 +151,51 @@ class RunSQLInput(BaseModel):
     model: str = Field(default="oci/generativeai-chat:2024-05-01")
     sqlcl: str = Field(default="sqlcl")
 
-def user_confirmed_tool(tool, auto_approve: bool):
+# ====== CHANGED: approval happens in UI; tool execution stays in agent loop ======
+async def user_confirmed_tool(original_tool, auto_approve):
     async def wrapper(*args, **kwargs):
         sql_query = kwargs.get("sql", args[0] if args else "select sysdate from dual")
         payload = {"sql": sql_query}
-        try:
-            if not auto_approve:
-                if not st.sidebar.button(f"Allow SQL: {sql_query}"):
-                    return "⚠️ Execution cancelled by user."
-            if hasattr(tool, "ainvoke"):
-                return await tool.ainvoke(payload)
-            elif hasattr(tool, "invoke"):
-                return tool.invoke(payload)
-            return tool.run(**payload)
-        except Exception as e:
-            return f"ERROR executing SQLcl tool: {e}"
-    return StructuredTool(name=tool.name, description=tool.description or "SQL tool", args_schema=RunSQLInput, coroutine=wrapper)
+        if not auto_approve:
+            _global_state.log_q.put(f"[DEBUG] Queuing SQL for approval: {sql_query}")
+            future = concurrent.futures.Future()
+            _global_state.pending_approvals[sql_query] = {
+                "original_tool": original_tool,
+                "payload": payload,
+                "future": future,
+            }
+            try:
+                decision = await asyncio.wait_for(asyncio.wrap_future(future), timeout=300.0)
+            except asyncio.TimeoutError:
+                if sql_query in _global_state.pending_approvals:
+                    del _global_state.pending_approvals[sql_query]
+                return "⚠️ SQL approval timed out after 5 minutes. Execution denied."
+            except concurrent.futures.CancelledError:
+                return "⚠️ SQL execution denied by user."
+
+            approved = bool(decision is True or (isinstance(decision, dict) and decision.get("approved")))
+            if not approved:
+                return "❌ SQL execution denied."
+
+            # Execute tool HERE (inside the same event loop as the agent)
+            if hasattr(original_tool, "ainvoke"):
+                return await original_tool.ainvoke(payload)
+            elif hasattr(original_tool, "invoke"):
+                return original_tool.invoke(payload)
+            return original_tool.run(**payload)
+        else:
+            if hasattr(original_tool, "ainvoke"):
+                return await original_tool.ainvoke(payload)
+            elif hasattr(original_tool, "invoke"):
+                return original_tool.invoke(payload)
+            return original_tool.run(**payload)
+
+    return StructuredTool(
+        name=original_tool.name,
+        description=original_tool.description or "SQL tool",
+        args_schema=RunSQLInput,
+        coroutine=wrapper,
+    )
 
 def normalize_output(ai_response, history):
     if isinstance(ai_response, AgentFinish):
@@ -280,7 +311,7 @@ async def agent_loop(auto_approve):
                 else:
                     log(f"🔴 [{name}] Connection failed.")
 
-            tools_final = [user_confirmed_tool(t, auto_approve) if is_sql_tool(t) else t for t in all_tools]
+            tools_final = [await user_confirmed_tool(t, auto_approve) if is_sql_tool(t) else t for t in all_tools]
             tools_final += [run_python, _rag_agent_service]
 
             agent = initialize_agent(
@@ -375,7 +406,7 @@ def main():
     ss.setdefault("suppress_refresh", False)
     ss.setdefault("chat_history", [])
     ss.setdefault("chat_input", "")
-    ss.setdefault("pending_response", False)  # New: Track if waiting for AI reply
+    ss.setdefault("pending_response", False)  # Track if waiting for AI reply
 
     # Clear textarea state BEFORE the widget is created (set last turn)
     if ss.get("_clear_chat_input", False):
@@ -385,6 +416,15 @@ def main():
     auto_approve = st.sidebar.checkbox("Auto-approve SQL executions", value=False)
     agent_running = ("agent" in _global_state.threads) and _global_state.threads["agent"].is_alive()
     st.sidebar.markdown(f"**Status:** {'🟢 Running' if agent_running else '🔴 Stopped'}")
+
+    # Test button to add a fake pending SQL (for debugging)
+    if st.sidebar.button("🧪 Test Add Pending SQL"):
+        from langchain_core.tools import Tool
+        fake_tool = Tool(name="test_sql", description="Fake SQL tool", func=lambda x: "Fake result")
+        future = concurrent.futures.Future()
+        _global_state.pending_approvals["SELECT 1 FROM DUAL;"] = {"original_tool": fake_tool, "payload": {"sql": "SELECT 1 FROM DUAL;"}, "future": future}
+        st.info("Added test SQL for approval.")
+        st.rerun()
 
     c1, c2 = st.sidebar.columns(2)
     if c1.button("▶️ Start Agent"):
@@ -436,40 +476,104 @@ def main():
     )
 
     # ---------- Conversation (render via placeholder) ----------
-    st.markdown("---")
-    st.markdown("### 💬 Conversation")
+    st.markdown("#### 💬 Conversation")
     chat_ph = st.empty()
 
-    def render_chat():
+    # session guards
+    ss.setdefault("_chat_hash", None)
+    ss.setdefault("_chat_rendered_once", False)
+
+    def _render_chat(always: bool = False):
+        """Render the chat panel reliably.
+        First render is forced; later renders only when content changes.
+        """
+        # compute hash
+        try:
+            new_hash = _hash_chat(ss.chat_history)
+        except Exception:
+            new_hash = str(time.time())  # fallback
+
+        # decide if we should render
+        should_render = always or (new_hash != ss._chat_hash) or (not ss._chat_rendered_once)
+        if not should_render:
+            return
+
+        ss._chat_hash = new_hash
+        ss._chat_rendered_once = True
+
+        # build bubbles
         bubbles = []
         for role, content in ss.chat_history:
             if role == "user":
                 safe = _md_to_html(str(content))
                 bubbles.append(
-                    f"<div style='background:#2a2a2a;color:#fff;padding:10px;border-radius:8px;margin-bottom:8px;'>"
-                    f"<b>👤 You:</b><br>{safe}</div>"
+                    "<div style='background:#2a2a2a;color:#fff;padding:10px;border-radius:8px;margin-bottom:8px;'>"
+                    "<b>👤 You:</b><br>" + safe + "</div>"
                 )
             else:
                 cleaned = _clean_ai_text(str(content))
                 safe = _md_to_html(cleaned)
                 bubbles.append(
-                    f"<div style='background:#1e1e1e;color:#9CDCFE;padding:10px;border-radius:8px;margin-bottom:8px;'>"
-                    f"<b>🤖 AI:</b><br>{safe}</div>"
+                    "<div style='background:#1e1e1e;color:#9CDCFE;padding:10px;border-radius:8px;margin-bottom:8px;'>"
+                    "<b>🤖 AI:</b><br>" + safe + "</div>"
                 )
-        chat_ph.markdown(
-            f"""
-            <div id="chatbox" style="background:#111; padding:10px; border-radius:8px; height:400px; overflow-y:auto;">
-                {''.join(bubbles) or '<i>No conversation yet...</i>'}
-            </div>
-            <script>
-            var cb = document.getElementById('chatbox');
-            if (cb) {{ cb.scrollTop = cb.scrollHeight; }}
-            </script>
-            """,
-            unsafe_allow_html=True,
+
+        # no f-strings/triple quotes to avoid parser issues
+        html_block = (
+            "<div id='chatbox' style='background:#111; padding:10px; border-radius:8px; "
+            "height:300px; overflow-y:auto;'>"
+            + ("".join(bubbles) if bubbles else "<i>No conversation yet...</i>")
+            + "</div>"
+            + "<script>(function(){var cb=document.getElementById('chatbox');"
+            "if(cb){cb.scrollTop=cb.scrollHeight;}})();</script>"
         )
 
-    render_chat()
+        chat_ph.markdown(html_block, unsafe_allow_html=True)
+
+    # force initial render once per page load
+    _render_chat(always=True)
+
+
+    # ---------- Pending SQL Approvals ----------
+    pending_sqls = list(_global_state.pending_approvals.keys())
+    if pending_sqls:
+        st.markdown("### Pending SQL Approvals")
+        for sql in pending_sqls:
+            item = _global_state.pending_approvals[sql]
+            st.write(f"**SQL Query:** {sql}")
+            col1, col2 = st.columns(2)
+
+            # ====== CHANGED: only signal approval; do NOT execute the tool here ======
+            if col1.button("✅ Approve and Execute", key=f"approve_{hash(sql)}"):
+                _global_state.log_q.put(f"[DEBUG] Approving SQL: {sql}")
+                try:
+                    item['future'].set_result({"approved": True})
+                    st.success("✅ Approved. Execution will proceed.")
+                    _global_state.log_q.put(f"[DEBUG] Future approval set for {sql}")
+                except Exception as e:
+                    _global_state.log_q.put(f"[DEBUG] Approval exception: {e}")
+                    st.error(f"❌ Error: {e}")
+                finally:
+                    if sql in _global_state.pending_approvals:
+                        del _global_state.pending_approvals[sql]
+                st.rerun()
+
+            # ====== CHANGED: only signal denial ======
+            if col2.button("❌ Deny", key=f"deny_{hash(sql)}"):
+                _global_state.log_q.put(f"[DEBUG] Denying SQL: {sql}")
+                try:
+                    item['future'].set_result({"approved": False})
+                except Exception:
+                    try:
+                        item['future'].cancel()
+                    except Exception:
+                        pass
+                finally:
+                    if sql in _global_state.pending_approvals:
+                        del _global_state.pending_approvals[sql]
+                st.rerun()
+    else:
+        st.info(f"No pending SQL approvals. Pending count: {len(_global_state.pending_approvals)}")
 
     # ---------- Input (single-click submit) ----------
     status_ph = st.empty()  # thinking line above button
@@ -520,7 +624,7 @@ def main():
             ss.chat_history.append(("ai", reply))
             ss.pending_response = False  # Clear pending flag
             status_ph.empty()  # Clear thinking status
-            render_chat()  # Update chat immediately
+            _render_chat()  # Update chat immediately
             st.rerun()  # Rerun to ensure UI updates
         except queue.Empty:
             pass  # No response yet; continue
@@ -532,6 +636,7 @@ def main():
             st_autorefresh(interval=120, key="live_log_refresh")
     except Exception:
         pass
+
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     main()
