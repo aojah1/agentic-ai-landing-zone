@@ -42,3 +42,4 @@ mcp_server/mcp_redis/src/tools/__pycache__/dataframe.cpython-313.pyc
 mcp_server/mcp_redis/src/tools/__pycache__/hash.cpython-313.pyc
 mcp_server/mcp_redis/src/tools/__pycache__/server_management.cpython-313.pyc
 client/.DS_Store
+client/ai_ops/images/db_operator.mp4
