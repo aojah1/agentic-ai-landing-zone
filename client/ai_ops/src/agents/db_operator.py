@@ -172,8 +172,8 @@ async def main() -> None:
         all_tools += await load_tools_from_session("Oracle SQLcl", adb_session)
         all_tools += await load_tools_from_session("Tavily", tavily_session)
         all_tools += await load_tools_from_session("Local File Server", local_session)
-        #all_tools += await load_tools_from_session("redis", redis_session)
-        #all_tools += await load_tools_from_session("dbtools", dbtools_session)
+        all_tools += await load_tools_from_session("redis", redis_session)
+        all_tools += await load_tools_from_session("dbtools", dbtools_session)
 
 
         # Wrap SQL tools with confirmation

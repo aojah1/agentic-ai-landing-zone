@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 # ─── OCI LLM ──────────────────────────────────────────
-from langchain_community.embeddings import OCIGenAIEmbeddings
+from langchain_oci import OCIGenAIEmbeddings
 from src.common.config import *
 
 

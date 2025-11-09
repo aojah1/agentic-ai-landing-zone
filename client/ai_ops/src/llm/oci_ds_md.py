@@ -1,7 +1,7 @@
 import oci
 import ads
 
-from langchain_community.chat_models import ChatOCIModelDeployment
+from langchain_oci.chat_models import ChatOCIModelDeployment
 from ads.common import auth as ads_auth
 from src.common.config import *
 print(AUTH_TYPE)

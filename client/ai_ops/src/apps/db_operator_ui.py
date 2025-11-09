@@ -1,3 +1,16 @@
+
+# --- bootstrap sys.path so 'src' is importable ---
+from pathlib import Path
+import sys
+
+# adjust depth so this points to the folder that directly contains "src"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]   # likely .../client/ai_ops
+# If your tree is deeper/shallower, change [2] to [1] or [3] accordingly.
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+# -----------------------------------------------
+
 import os
 import asyncio
 import threading
@@ -16,12 +29,12 @@ from langchain_core.tools import StructuredTool
 from mcp import StdioServerParameters
 from langchain_mcp_adapters.tools import load_mcp_tools
 
-from src.llm.oci_genai import initialize_llm
 from src.prompt_engineering.topics.db_operator import promt_oracle_db_operator
 from src.tools.rag_agent import _rag_agent_service
 from src.tools.python_scratchpad import run_python
 from src.common.config import *
 from src.utils.mcp_helper_connection import safe_connect
+from src.llm.oci_genai import initialize_llm
 
 from langchain.callbacks.base import BaseCallbackHandler
 import html, json, re, hashlib
@@ -339,6 +352,15 @@ async def agent_loop(auto_approve):
                 try:
                     prompt = _global_state.prompt_q.get(timeout=0.5)
                     log(f"🟡 Received: {prompt}")
+                    # >>> ADD THIS BLOCK <<<
+                    if str(prompt).strip().lower() in {
+                        "clear memory", "clear history", "reset", "reset memory", "/clear", "/reset"
+                    }:
+                        history.clear()
+                        _global_state.response_q.put("🧠 Memory cleared. Conversation context reset.")
+                        log("🧽 Cleared agent conversation history on user request.")
+                        continue
+                    # <<< END ADD >>>
                     history.append(HumanMessage(content=prompt))
                     ai_resp = await agent.ainvoke({"input": history})
                     msg = normalize_output(ai_resp, history)
@@ -479,13 +501,26 @@ def main():
     logs_box = st.empty()
     log_text_raw = "\n".join(_global_state.trace_logs[-1500:]) or "No logs yet..."
     log_html = (
-        "<div style=\"background-color:#111; color:#EEE; padding:10px;"
-        " border-radius:8px; height:300px; overflow-y:auto;"
-        " font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace;"
-        " font-size:13px; line-height:1.35;\">"
+        "<div id='logsbox' style='background-color:#111;color:#EEE;padding:10px;"
+        "border-radius:8px;height:300px;overflow-y:auto;"
+        "font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Courier New\", monospace;"
+        "font-size:13px;line-height:1.35;'>"
         + _safe_html_text(log_text_raw) +
-        "</div>"
+        f"</div><span id='logsmarker' data-n='{len(_global_state.trace_logs)}' style='display:none;'></span>"
+        "<script>(function(){"
+        "  var el=document.getElementById('logsbox'); if(!el) return;"
+        "  function tail(){"
+        "    el.scrollTop = el.scrollHeight;"
+        "    el.scrollTop = el.scrollHeight - el.clientHeight + 1;"  # ensure bottom even if layout shifts
+        "  }"
+        "  tail();"
+        "  requestAnimationFrame(tail);"
+        "  setTimeout(tail,0);"
+        "})();</script>"
     )
+
+
+
     _render_html(logs_box, log_html, fallback_text=log_text_raw)
 
     # ---------- Conversation (STABLE, NO FLICKER) ----------
@@ -521,13 +556,23 @@ def main():
                 )
 
         html_block = (
-            "<div id='chatbox' style='background:#111; padding:10px; border-radius:8px; "
-            "height:300px; overflow-y:auto;'>"
+            "<div id='chatbox' style='background:#111;color:#EEE;padding:10px;border-radius:8px;"
+            "height:300px;overflow-y:auto;'>"
             + ("".join(bubbles) if bubbles else "<i>No conversation yet...</i>")
-            + "</div>"
-            + "<script>(function(){var cb=document.getElementById('chatbox');"
-              "if(cb){cb.scrollTop=cb.scrollHeight;}})();</script>"
+            + f"</div><span id='chatmarker' data-n='{len(ss.chat_history)}' style='display:none;'></span>"
+            "<script>(function(){"
+            "  var cb=document.getElementById('chatbox'); if(!cb) return;"
+            "  function tail(){"
+            "    cb.scrollTop = cb.scrollHeight;"
+            "    cb.scrollTop = cb.scrollHeight - cb.clientHeight + 1;"
+            "  }"
+            "  tail();"
+            "  requestAnimationFrame(tail);"
+            "  setTimeout(tail,0);"
+            "})();</script>"
         )
+
+
         _render_html(chat_ph, html_block, fallback_text="(chat render fallback)")
 
     # initial render

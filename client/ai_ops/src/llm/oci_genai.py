@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 # ─── OCI LLM ──────────────────────────────────────────
-from langchain_community.chat_models import ChatOCIGenAI
+from langchain_oci import ChatOCIGenAI
 from src.common.config import *
 
 
