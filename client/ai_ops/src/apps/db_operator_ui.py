@@ -1,4 +1,3 @@
-
 # --- bootstrap sys.path so 'src' is importable ---
 from pathlib import Path
 import sys
@@ -18,6 +17,7 @@ import queue
 import time
 from contextlib import AsyncExitStack
 import concurrent.futures
+from dataclasses import dataclass
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -188,6 +188,28 @@ load_dotenv()
 
 
 # ─────────────────────────────────────────────
+# CONNECTION CONFIG (builds MCP targets from UI inputs)
+# ─────────────────────────────────────────────
+@dataclass
+class ConnectionConfig:
+    sqlcl_command: str
+    tavily_remote: str
+    filesystem_key: str
+    redis_host: str
+    redis_port: int
+    dbtools_host: str
+    dbtools_port: int
+
+    def build(self):
+        adb_server = StdioServerParameters(command=self.sqlcl_command, args=["-mcp"])
+        tavily_server = StdioServerParameters(command="npx", args=["-y", "mcp-remote", self.tavily_remote])
+        file_server = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", self.filesystem_key])
+        url_redis = f"{self.redis_host}:{self.redis_port}/mcp"
+        url_dbtools = f"{self.dbtools_host}:{self.dbtools_port}/mcp"
+        return adb_server, tavily_server, file_server, url_redis, url_dbtools
+
+
+# ─────────────────────────────────────────────
 # HELPERS (app logic)
 # ─────────────────────────────────────────────
 def is_sql_tool(tool) -> bool:
@@ -288,21 +310,43 @@ def _md_to_html(md_text: str) -> str:
     esc = esc.replace("\n", "<br>")
     return esc
 
+def _tool_details_safe(tool):
+    """Return (name, description, args_schema_json|None) without throwing."""
+    try:
+        name = getattr(tool, "name", type(tool).__name__)
+    except Exception:
+        name = type(tool).__name__
+    try:
+        desc = (getattr(tool, "description", "") or "").strip()
+    except Exception:
+        desc = ""
+    schema_json = None
+    try:
+        args_schema = getattr(tool, "args_schema", None)
+        if args_schema:
+            # Pydantic v2 first, then v1 fallback
+            if hasattr(args_schema, "model_json_schema"):
+                schema_json = args_schema.model_json_schema()
+            elif hasattr(args_schema, "schema"):
+                schema_json = args_schema.schema()
+            else:
+                schema_json = str(args_schema)
+    except Exception:
+        schema_json = None
+    return name, desc, schema_json
+
 
 # ─────────────────────────────────────────────
 # ASYNC AGENT LOOP
 # ─────────────────────────────────────────────
-async def agent_loop(auto_approve):
+async def agent_loop(auto_approve, conn_cfg: ConnectionConfig):
     log = lambda m: _global_state.log_q.put(f"[{time.strftime('%H:%M:%S')}] {m}")
     try:
         log("🟡 Initializing LLM + MCP servers...")
         model = initialize_llm()
 
-        adb_server = StdioServerParameters(command=SQLCLI_MCP_PROFILE, args=["-mcp"])
-        tavily_server = StdioServerParameters(command="npx", args=["-y", "mcp-remote", TAVILY_MCP_SERVER])
-        file_server = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", FILE_SYSTEM_ACCESS_KEY])
-        url_redis = f"{MCP_SSE_HOST}:{MCP_SSE_PORT}/mcp"
-        url_dbtools = f"{MCP_SSE_HOST_DBTOOLS}:{MCP_SSE_PORT_DBTOOLS}/mcp"
+        # Build from sidebar config
+        adb_server, tavily_server, file_server, url_redis, url_dbtools = conn_cfg.build()
 
         async with AsyncExitStack() as stack:
             adb_sess = await safe_connect("Oracle SQLcl", adb_server, stack)
@@ -335,6 +379,12 @@ async def agent_loop(auto_approve):
             tools_final = [await user_confirmed_tool(t, auto_approve) if is_sql_tool(t) else t for t in all_tools]
             tools_final += [run_python, _rag_agent_service]
 
+            # 🔎 NEW: Log details for the explicitly added tools
+            for extra in [run_python, _rag_agent_service]:
+                name, desc, schema_json = _tool_details_safe(extra)
+                log(f"🧩 Added built-in tool: {name}")
+
+
             agent = initialize_agent(
                 tools=tools_final,
                 llm=model,
@@ -352,7 +402,6 @@ async def agent_loop(auto_approve):
                 try:
                     prompt = _global_state.prompt_q.get(timeout=0.5)
                     log(f"🟡 Received: {prompt}")
-                    # >>> ADD THIS BLOCK <<<
                     if str(prompt).strip().lower() in {
                         "clear memory", "clear history", "reset", "reset memory", "/clear", "/reset"
                     }:
@@ -360,7 +409,6 @@ async def agent_loop(auto_approve):
                         _global_state.response_q.put("🧠 Memory cleared. Conversation context reset.")
                         log("🧽 Cleared agent conversation history on user request.")
                         continue
-                    # <<< END ADD >>>
                     history.append(HumanMessage(content=prompt))
                     ai_resp = await agent.ainvoke({"input": history})
                     msg = normalize_output(ai_resp, history)
@@ -382,11 +430,11 @@ async def agent_loop(auto_approve):
 # ─────────────────────────────────────────────
 # THREADING
 # ─────────────────────────────────────────────
-def start_agent_thread(auto_approve):
+def start_agent_thread(auto_approve, conn_cfg: ConnectionConfig):
     if "agent" in _global_state.threads and _global_state.threads["agent"].is_alive():
         return
     _global_state.stop_flag["stop"] = False
-    t = threading.Thread(target=lambda: asyncio.run(agent_loop(auto_approve)), daemon=True)
+    t = threading.Thread(target=lambda: asyncio.run(agent_loop(auto_approve, conn_cfg)), daemon=True)
     t.start()
     _global_state.threads["agent"] = t
 
@@ -438,9 +486,54 @@ def main():
         ss._clear_chat_input = False
         ss.pop("chat_input", None)
 
+    # ---------- Sidebar Controls ----------
+    st.sidebar.markdown("### ⚙️ Agent Settings")
+
     auto_approve = st.sidebar.checkbox("Auto-approve SQL executions", value=False)
+
     agent_running = ("agent" in _global_state.threads) and _global_state.threads["agent"].is_alive()
     st.sidebar.markdown(f"**Status:** {'🟢 Running' if agent_running else '🔴 Stopped'}")
+
+    with st.sidebar.expander("MCP Connections", expanded=True):
+        # Pre-fill from env/constants; keep types intact
+        def _to_int(v, fallback: int):
+            try:
+                return int(v)
+            except Exception:
+                return int(fallback)
+
+        sqlcl_default = (os.getenv("SQLCLI_MCP_PROFILE") or str(SQLCLI_MCP_PROFILE)).strip()
+        tavily_default = (os.getenv("TAVILY_MCP_SERVER") or str(TAVILY_MCP_SERVER)).strip()
+        fs_key_default = (os.getenv("FILE_SYSTEM_ACCESS_KEY") or str(FILE_SYSTEM_ACCESS_KEY)).strip()
+
+        redis_host_default = (os.getenv("MCP_SSE_HOST") or str(MCP_SSE_HOST)).strip()
+        redis_port_default = _to_int(os.getenv("MCP_SSE_PORT") or MCP_SSE_PORT, MCP_SSE_PORT)
+
+        dbtools_host_default = (os.getenv("MCP_SSE_HOST_DBTOOLS") or str(MCP_SSE_HOST_DBTOOLS)).strip()
+        dbtools_port_default = _to_int(os.getenv("MCP_SSE_PORT_DBTOOLS") or MCP_SSE_PORT_DBTOOLS, MCP_SSE_PORT_DBTOOLS)
+
+        sqlcl_command = st.text_input("SQLcl MCP command/profile", value=sqlcl_default, help="E.g., 'sql' or profile script")
+        tavily_remote  = st.text_input("Tavily MCP Remote", value=tavily_default, help="E.g., https://…")
+        filesystem_key = st.text_input("Filesystem server arg", value=fs_key_default)
+
+        st.markdown("**Redis SSE (Streamable HTTP MCP)**")
+        redis_host = st.text_input("Redis SSE Host (with scheme)", value=redis_host_default, help="E.g., https://localhost")
+        redis_port = st.number_input("Redis SSE Port", value=redis_port_default, min_value=1, max_value=65535, step=1)
+
+        st.markdown("**DBTools SSE (Streamable HTTP MCP)**")
+        dbtools_host = st.text_input("DBTools SSE Host (with scheme)", value=dbtools_host_default, help="E.g., https://localhost")
+        dbtools_port = st.number_input("DBTools SSE Port", value=dbtools_port_default, min_value=1, max_value=65535, step=1)
+
+        # Build the config object (passed into agent thread)
+        conn_cfg = ConnectionConfig(
+            sqlcl_command=sqlcl_command.strip(),
+            tavily_remote=tavily_remote.strip(),
+            filesystem_key=filesystem_key.strip(),
+            redis_host=redis_host.strip(),
+            redis_port=int(redis_port),
+            dbtools_host=dbtools_host.strip(),
+            dbtools_port=int(dbtools_port),
+        )
 
     # Optional live refresh (slow)
     live_refresh = st.sidebar.toggle(
@@ -466,7 +559,7 @@ def main():
     if c1.button("▶️ Start Agent"):
         _global_state.trace_logs.append(f"[{time.strftime('%H:%M:%S')}] 🚀 Starting MCP Agent…")
         with st.spinner("Starting MCP Agent..."):
-            start_agent_thread(auto_approve)
+            start_agent_thread(auto_approve, conn_cfg)
             start_log_stream()
             st.success("✅ Agent started")
         # brief drain
@@ -518,9 +611,6 @@ def main():
         "  setTimeout(tail,0);"
         "})();</script>"
     )
-
-
-
     _render_html(logs_box, log_html, fallback_text=log_text_raw)
 
     # ---------- Conversation (STABLE, NO FLICKER) ----------
@@ -571,8 +661,6 @@ def main():
             "  setTimeout(tail,0);"
             "})();</script>"
         )
-
-
         _render_html(chat_ph, html_block, fallback_text="(chat render fallback)")
 
     # initial render
