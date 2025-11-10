@@ -2,65 +2,87 @@
 from pathlib import Path
 import sys
 
-# adjust depth so this points to the folder that directly contains "src"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]   # likely .../client/ai_ops
-# If your tree is deeper/shallower, change [2] to [1] or [3] accordingly.
-
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 # -----------------------------------------------
 
 import os
-import asyncio
-import threading
-import queue
 import time
-from contextlib import AsyncExitStack
+import re
+import html
+import queue
 import concurrent.futures
-from dataclasses import dataclass
 
 import streamlit as st
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.agents import AgentFinish
-from langchain.agents import initialize_agent, AgentType
-from langchain_core.tools import StructuredTool
-from mcp import StdioServerParameters
-from langchain_mcp_adapters.tools import load_mcp_tools
-
-from src.prompt_engineering.topics.db_operator import promt_oracle_db_operator
-from src.tools.rag_agent import _rag_agent_service
-from src.tools.python_scratchpad import run_python
 from src.common.config import *
-from src.utils.mcp_helper_connection import safe_connect
-from src.llm.oci_genai import initialize_llm
+# Core agent module
+from src.agents.db_operator_core import (
+    AgentRuntime,
+    ConnectionConfig,
+    start_agent_thread,
+    start_log_stream,
+)
 
-from langchain.callbacks.base import BaseCallbackHandler
-import html, json, re, hashlib
+# ─────────────────────────────────────────────
+# SIMPLE TOKEN AUTH (hard-coded with env override)
+# ─────────────────────────────────────────────
+# Change the default token to whatever you want, or set env DBOP_UI_TOKEN
+HARD_TOKEN = os.getenv("DBOP_UI_TOKEN", "dbop-ui-secret-123")
+
+def _auth_section() -> bool:
+    """Render auth UI and return True if user is authenticated this session."""
+    ss = st.session_state
+    ss.setdefault("authed", False)
+    ss.setdefault("auth_err", "")
+
+    st.sidebar.markdown("### 🔐 Authentication")
+    if ss.get("authed", False):
+        st.sidebar.success("Authenticated")
+        if st.sidebar.button("Lock"):
+            ss.authed = False
+            ss.auth_err = ""
+            # Optionally clear runtime on logout
+            if "runtime" in ss:
+                try:
+                    ss.runtime.stop_flag["stop"] = True
+                except Exception:
+                    pass
+                ss.pop("runtime", None)
+            st.rerun()
+        return True
+
+    token = st.sidebar.text_input("Access token", type="password", placeholder="Enter token")
+    if st.sidebar.button("Unlock"):
+        if (token or "").strip() == HARD_TOKEN:
+            ss.authed = True
+            ss.auth_err = ""
+            st.rerun()
+        else:
+            ss.auth_err = "Invalid token."
+
+    if ss.get("auth_err"):
+        st.sidebar.error(ss["auth_err"])
+    return False
 
 
 # ─────────────────────────────────────────────
-# SAFE RENDER + STABILITY HELPERS
+# SAFE RENDER + STABILITY HELPERS (UI-only)
 # ─────────────────────────────────────────────
-# Strip ASCII control chars except \t, \n, \r
-_CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')
-
 def _safe_str(x) -> str:
-    """Best-effort stringify + strip control chars."""
     try:
+        import json
         s = x if isinstance(x, str) else json.dumps(x, ensure_ascii=False, default=str)
     except Exception:
         s = str(x)
-    return _CONTROL_CHARS_RE.sub('', s)
+    return re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', s)
 
 def _safe_html_text(text: str) -> str:
-    """Escape HTML and convert newlines to <br> safely."""
     s = _safe_str(text)
     return html.escape(s).replace("\n", "<br>")
 
 def _render_html(container, html_str: str, fallback_text: str = ""):
-    """Render HTML safely; on failure, show plain text instead (prevents UI crashes)."""
     try:
         container.markdown(html_str, unsafe_allow_html=True)
     except Exception as e:
@@ -68,6 +90,7 @@ def _render_html(container, html_str: str, fallback_text: str = ""):
         container.code(_safe_str(fallback_text or html_str), language="text")
 
 def _hash_chat(chat_history: list[tuple[str, str]]) -> str:
+    import hashlib
     h = hashlib.sha256()
     for role, content in chat_history:
         h.update(role.encode("utf-8", errors="ignore")); h.update(b"\x00")
@@ -75,213 +98,12 @@ def _hash_chat(chat_history: list[tuple[str, str]]) -> str:
     return h.hexdigest()
 
 def rerun_throttled(min_interval_sec: float = 1.0, key: str = "_last_rerun_ts"):
-    """Prevent back-to-back reruns causing flicker."""
     now = time.time()
     last = st.session_state.get(key, 0.0)
     if now - last >= min_interval_sec:
         st.session_state[key] = now
         st.rerun()
 
-
-class ReactLogHandler(BaseCallbackHandler):
-    """Stream real-time logs to a queue; resilient to None/variant payloads."""
-    def __init__(self, log_q):
-        self.log_q = log_q
-
-    def _ts(self):
-        return time.strftime('%H:%M:%S')
-
-    def _emit(self, emoji: str, prefix: str, msg: str):
-        try:
-            safe = msg if isinstance(msg, str) else json.dumps(msg, ensure_ascii=False, default=str)
-        except Exception:
-            safe = str(msg)
-        safe = _safe_str(safe)  # sanitize at source
-        self.log_q.put(f"[{self._ts()}] {emoji} {prefix}: {safe}")
-
-    def _name_from_serialized(self, serialized):
-        try:
-            if isinstance(serialized, dict):
-                if "name" in serialized and isinstance(serialized["name"], str):
-                    return serialized["name"]
-                if "id" in serialized:
-                    sid = serialized["id"]
-                    if isinstance(sid, (list, tuple)) and sid:
-                        return ".".join(map(str, sid))
-                    return str(sid)
-                return json.dumps(serialized, ensure_ascii=False)[:120]
-            if isinstance(serialized, (list, tuple)):
-                return ".".join(map(str, serialized))
-            if serialized is None:
-                return "Unknown"
-            return str(serialized)
-        except Exception:
-            return "Unknown"
-
-    # callbacks
-    def on_chain_start(self, serialized, inputs, **kwargs):
-        name = self._name_from_serialized(serialized)
-        self._emit("🔗", "Chain Start", {"name": name, "inputs": inputs})
-
-    def on_chain_end(self, outputs, **kwargs):
-        self._emit("✅", "Chain End", outputs)
-
-    def on_error(self, error, **kwargs):
-        self._emit("💥", "Error", str(error))
-
-    def on_llm_start(self, serialized, prompts, **kwargs):
-        name = self._name_from_serialized(serialized)
-        if isinstance(prompts, (list, tuple)):
-            for p in prompts:
-                self._emit("🧠", f"LLM Prompt ({name})", p)
-        else:
-            self._emit("🧠", f"LLM Prompt ({name})", prompts)
-
-    def on_llm_end(self, response, **kwargs):
-        text = None
-        try:
-            gens = getattr(response, "generations", None)
-            if gens and len(gens) and len(gens[0]) and getattr(gens[0][0], "text", None):
-                text = gens[0][0].text
-        except Exception:
-            pass
-        self._emit("💡", "LLM Response", text or "<no generations>")
-
-    def on_tool_start(self, serialized, input_str, **kwargs):
-        name = self._name_from_serialized(serialized)
-        self._emit("🧩", f"Action: {name}", input_str)
-
-    def on_tool_end(self, output, **kwargs):
-        self._emit("👁️", "Observation", output)
-
-    def on_agent_action(self, action, **kwargs):
-        log_text = getattr(action, "log", None)
-        self._emit("⚙️", "Agent Action", log_text or str(action))
-
-    def on_agent_finish(self, finish, **kwargs):
-        try:
-            val = getattr(finish, "return_values", {}) or {}
-        except Exception:
-            val = {}
-        self._emit("🎯", "Final Answer", val.get("output") or val)
-
-
-# ─────────────────────────────────────────────
-# GLOBAL STATE
-# ─────────────────────────────────────────────
-class GlobalState:
-    def __init__(self):
-        self.prompt_q = queue.Queue()
-        self.response_q = queue.Queue()
-        self.log_q = queue.Queue()
-        self.stop_flag = {"stop": False}
-        self.trace_logs = []
-        self.threads = {}
-        self.pending_approvals = {}  # sql -> {"original_tool": tool, "payload": payload, "future": future}
-
-if "global_state" not in st.session_state:
-    st.session_state.global_state = GlobalState()
-_global_state = st.session_state.global_state
-
-st.set_page_config(page_title="Oracle DB Operator", layout="wide")
-load_dotenv()
-
-
-# ─────────────────────────────────────────────
-# CONNECTION CONFIG (builds MCP targets from UI inputs)
-# ─────────────────────────────────────────────
-@dataclass
-class ConnectionConfig:
-    sqlcl_command: str
-    tavily_remote: str
-    filesystem_key: str
-    redis_host: str
-    redis_port: int
-    dbtools_host: str
-    dbtools_port: int
-
-    def build(self):
-        adb_server = StdioServerParameters(command=self.sqlcl_command, args=["-mcp"])
-        tavily_server = StdioServerParameters(command="npx", args=["-y", "mcp-remote", self.tavily_remote])
-        file_server = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", self.filesystem_key])
-        url_redis = f"{self.redis_host}:{self.redis_port}/mcp"
-        url_dbtools = f"{self.dbtools_host}:{self.dbtools_port}/mcp"
-        return adb_server, tavily_server, file_server, url_redis, url_dbtools
-
-
-# ─────────────────────────────────────────────
-# HELPERS (app logic)
-# ─────────────────────────────────────────────
-def is_sql_tool(tool) -> bool:
-    nm = getattr(tool, "name", "") or ""
-    return any(kw in nm.lower() for kw in ("adb", "sql", "oracle"))
-
-class RunSQLInput(BaseModel):
-    sql: str = Field(default="select sysdate from dual")
-    model: str = Field(default="oci/generativeai-chat:2024-05-01")
-    sqlcl: str = Field(default="sqlcl")
-
-# Approval inside UI; execution stays in agent loop
-async def user_confirmed_tool(original_tool, auto_approve):
-    async def wrapper(*args, **kwargs):
-        sql_query = kwargs.get("sql", args[0] if args else "select sysdate from dual")
-        payload = {"sql": sql_query}
-        if not auto_approve:
-            _global_state.log_q.put(f"[DEBUG] Queuing SQL for approval: {sql_query}")
-            future = concurrent.futures.Future()
-            _global_state.pending_approvals[sql_query] = {
-                "original_tool": original_tool,
-                "payload": payload,
-                "future": future,
-            }
-            try:
-                decision = await asyncio.wait_for(asyncio.wrap_future(future), timeout=300.0)
-            except asyncio.TimeoutError:
-                _global_state.pending_approvals.pop(sql_query, None)
-                return "⚠️ SQL approval timed out after 5 minutes. Execution denied."
-            except concurrent.futures.CancelledError:
-                return "⚠️ SQL execution denied by user."
-
-            approved = bool(decision is True or (isinstance(decision, dict) and decision.get("approved")))
-            if not approved:
-                # Abort chain immediately to stop agent continuation
-                raise RuntimeError("SQL execution denied by user.")
-
-            if hasattr(original_tool, "ainvoke"):
-                return await original_tool.ainvoke(payload)
-            elif hasattr(original_tool, "invoke"):
-                return original_tool.invoke(payload)
-            return original_tool.run(**payload)
-        else:
-            if hasattr(original_tool, "ainvoke"):
-                return await original_tool.ainvoke(payload)
-            elif hasattr(original_tool, "invoke"):
-                return original_tool.invoke(payload)
-            return original_tool.run(**payload)
-
-    return StructuredTool(
-        name=original_tool.name,
-        description=original_tool.description or "SQL tool",
-        args_schema=RunSQLInput,
-        coroutine=wrapper,
-    )
-
-def normalize_output(ai_response, history):
-    if isinstance(ai_response, AgentFinish):
-        msg = ai_response.return_values.get("output")
-    elif isinstance(ai_response, dict):
-        msg = ai_response.get("output")
-    else:
-        msg = ai_response
-    if isinstance(msg, AIMessage):
-        history.append(msg); return msg.content
-    elif isinstance(msg, str):
-        history.append(AIMessage(content=msg)); return msg
-    elif isinstance(msg, dict) and "content" in msg:
-        history.append(AIMessage(content=msg["content"])); return msg["content"]
-    return "<<no response>>"
-
-# Hide internal traces from AI panel
 def _clean_ai_text(text: str) -> str:
     if not text: return ""
     keep = []
@@ -293,7 +115,6 @@ def _clean_ai_text(text: str) -> str:
     m = re.search(r'(?is)Final Answer:\s*(.+)$', out)
     return m.group(1).strip() if m else out
 
-# Minimal markdown→HTML safe-ish rendering
 def _md_to_html(md_text: str) -> str:
     if not md_text:
         return ""
@@ -310,169 +131,25 @@ def _md_to_html(md_text: str) -> str:
     esc = esc.replace("\n", "<br>")
     return esc
 
-def _tool_details_safe(tool):
-    """Return (name, description, args_schema_json|None) without throwing."""
-    try:
-        name = getattr(tool, "name", type(tool).__name__)
-    except Exception:
-        name = type(tool).__name__
-    try:
-        desc = (getattr(tool, "description", "") or "").strip()
-    except Exception:
-        desc = ""
-    schema_json = None
-    try:
-        args_schema = getattr(tool, "args_schema", None)
-        if args_schema:
-            # Pydantic v2 first, then v1 fallback
-            if hasattr(args_schema, "model_json_schema"):
-                schema_json = args_schema.model_json_schema()
-            elif hasattr(args_schema, "schema"):
-                schema_json = args_schema.schema()
-            else:
-                schema_json = str(args_schema)
-    except Exception:
-        schema_json = None
-    return name, desc, schema_json
-
-
-# ─────────────────────────────────────────────
-# ASYNC AGENT LOOP
-# ─────────────────────────────────────────────
-async def agent_loop(auto_approve, conn_cfg: ConnectionConfig):
-    log = lambda m: _global_state.log_q.put(f"[{time.strftime('%H:%M:%S')}] {m}")
-    try:
-        log("🟡 Initializing LLM + MCP servers...")
-        model = initialize_llm()
-
-        # Build from sidebar config
-        adb_server, tavily_server, file_server, url_redis, url_dbtools = conn_cfg.build()
-
-        async with AsyncExitStack() as stack:
-            adb_sess = await safe_connect("Oracle SQLcl", adb_server, stack)
-            tav_sess = await safe_connect("Tavily", tavily_server, stack)
-            file_sess = await safe_connect("File Server", file_server, stack)
-            red_sess = await safe_connect("Redis", url_redis, stack, http_streamable=True)
-            dbt_sess = await safe_connect("DBTools", url_dbtools, stack, http_streamable=True)
-
-            all_tools = []
-            for name, sess in [
-                ("SQLcl", adb_sess),
-                ("Tavily", tav_sess),
-                ("File Server", file_sess),
-                ("Redis", red_sess),
-                ("DBTools", dbt_sess),
-            ]:
-                if sess:
-                    try:
-                        tools = await load_mcp_tools(sess)
-                        if tools:
-                            log(f"🟢 [{name}] Connected ({len(tools)} tools)")
-                        else:
-                            log(f"🟡 [{name}] Connected but no tools found.")
-                        all_tools += tools
-                    except Exception as e:
-                        log(f"🔴 [{name}] Failed to list tools: {e}")
-                else:
-                    log(f"🔴 [{name}] Connection failed.")
-
-            tools_final = [await user_confirmed_tool(t, auto_approve) if is_sql_tool(t) else t for t in all_tools]
-            tools_final += [run_python, _rag_agent_service]
-
-            # 🔎 NEW: Log details for the explicitly added tools
-            for extra in [run_python, _rag_agent_service]:
-                name, desc, schema_json = _tool_details_safe(extra)
-                log(f"🧩 Added built-in tool: {name}")
-
-
-            agent = initialize_agent(
-                tools=tools_final,
-                llm=model,
-                agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-                handle_parsing_errors=True,
-                verbose=True,
-                agent_kwargs={"prefix": promt_oracle_db_operator},
-                callbacks=[ReactLogHandler(_global_state.log_q)],
-            )
-
-            history = []
-            log("🚀 Agent loop started.")
-
-            while not _global_state.stop_flag["stop"]:
-                try:
-                    prompt = _global_state.prompt_q.get(timeout=0.5)
-                    log(f"🟡 Received: {prompt}")
-                    if str(prompt).strip().lower() in {
-                        "clear memory", "clear history", "reset", "reset memory", "/clear", "/reset"
-                    }:
-                        history.clear()
-                        _global_state.response_q.put("🧠 Memory cleared. Conversation context reset.")
-                        log("🧽 Cleared agent conversation history on user request.")
-                        continue
-                    history.append(HumanMessage(content=prompt))
-                    ai_resp = await agent.ainvoke({"input": history})
-                    msg = normalize_output(ai_resp, history)
-                    _global_state.response_q.put(msg)
-                    log("🟢 Response generated.")
-                except queue.Empty:
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    log(f"🔴 Error: {e}")
-                    # Ensure UI clears spinner on error
-                    _global_state.response_q.put(f"❌ {e}")
-
-            log("🟠 Agent shutting down.")
-    except Exception as e:
-        log(f"💥 Crash: {e}")
-        _global_state.response_q.put(f"❌ {e}")
-
-
-# ─────────────────────────────────────────────
-# THREADING
-# ─────────────────────────────────────────────
-def start_agent_thread(auto_approve, conn_cfg: ConnectionConfig):
-    if "agent" in _global_state.threads and _global_state.threads["agent"].is_alive():
-        return
-    _global_state.stop_flag["stop"] = False
-    t = threading.Thread(target=lambda: asyncio.run(agent_loop(auto_approve, conn_cfg)), daemon=True)
-    t.start()
-    _global_state.threads["agent"] = t
-
-def start_log_stream():
-    """Ultra-low latency log pump: blocks on .get() and never sleeps."""
-    if "stream" in _global_state.threads and _global_state.threads["stream"].is_alive():
-        return
-
-    MAX_LOGS = 5000
-
-    def pump():
-        while not _global_state.stop_flag["stop"]:
-            try:
-                msg = _global_state.log_q.get(timeout=0.2)
-                _global_state.trace_logs.append(_safe_str(msg))
-                while True:
-                    try:
-                        _global_state.trace_logs.append(_safe_str(_global_state.log_q.get_nowait()))
-                    except queue.Empty:
-                        break
-                if len(_global_state.trace_logs) > MAX_LOGS:
-                    del _global_state.trace_logs[: len(_global_state.trace_logs) - MAX_LOGS]
-            except queue.Empty:
-                continue
-
-    t = threading.Thread(target=pump, daemon=True)
-    t.start()
-    _global_state.threads["stream"] = t
-
 
 # ─────────────────────────────────────────────
 # STREAMLIT UI
 # ─────────────────────────────────────────────
 def main():
+    st.set_page_config(page_title="Oracle DB Operator", layout="wide")
+    load_dotenv()
+
     st.title("Oracle DB Operator 💬")
     st.caption("Conversational Agent for Oracle MCP Servers")
 
-    # ---------- Session ----------
+    # ---------- Authentication gate ----------
+    authed = _auth_section()
+    if not authed:
+        st.info("Enter a valid token in the left panel to unlock the chatbot.")
+        # Show minimal footer and return early; nothing else is initialized
+        st.stop()
+
+    # ---------- UI-local state (only after auth) ----------
     ss = st.session_state
     ss.setdefault("busy", False)
     ss.setdefault("suppress_refresh", False)
@@ -482,26 +159,26 @@ def main():
     ss.setdefault("_chat_hash", None)
     ss.setdefault("_chat_rendered_once", False)
 
-    if ss.get("_clear_chat_input", False):
-        ss._clear_chat_input = False
-        ss.pop("chat_input", None)
+    # ---------- Core runtime (kept inside Streamlit session) ----------
+    if "runtime" not in ss:
+        ss.runtime = AgentRuntime()
+    runtime = ss.runtime
 
     # ---------- Sidebar Controls ----------
     st.sidebar.markdown("### ⚙️ Agent Settings")
-
     auto_approve = st.sidebar.checkbox("Auto-approve SQL executions", value=False)
 
-    agent_running = ("agent" in _global_state.threads) and _global_state.threads["agent"].is_alive()
+    agent_running = ("agent" in runtime.threads) and runtime.threads["agent"].is_alive()
     st.sidebar.markdown(f"**Status:** {'🟢 Running' if agent_running else '🔴 Stopped'}")
 
     with st.sidebar.expander("MCP Connections", expanded=True):
-        # Pre-fill from env/constants; keep types intact
         def _to_int(v, fallback: int):
             try:
                 return int(v)
             except Exception:
                 return int(fallback)
 
+        # Defaults from your config/env
         sqlcl_default = (os.getenv("SQLCLI_MCP_PROFILE") or str(SQLCLI_MCP_PROFILE)).strip()
         tavily_default = (os.getenv("TAVILY_MCP_SERVER") or str(TAVILY_MCP_SERVER)).strip()
         fs_key_default = (os.getenv("FILE_SYSTEM_ACCESS_KEY") or str(FILE_SYSTEM_ACCESS_KEY)).strip()
@@ -524,7 +201,6 @@ def main():
         dbtools_host = st.text_input("DBTools SSE Host (with scheme)", value=dbtools_host_default, help="E.g., https://localhost")
         dbtools_port = st.number_input("DBTools SSE Port", value=dbtools_port_default, min_value=1, max_value=65535, step=1)
 
-        # Build the config object (passed into agent thread)
         conn_cfg = ConnectionConfig(
             sqlcl_command=sqlcl_command.strip(),
             tavily_remote=tavily_remote.strip(),
@@ -535,19 +211,17 @@ def main():
             dbtools_port=int(dbtools_port),
         )
 
-    # Optional live refresh (slow)
     live_refresh = st.sidebar.toggle(
         "Live refresh logs",
         value=False,
         help="When ON, page re-runs every 4 seconds to pull new logs."
     )
 
-    # Test button to add a fake pending SQL
     if st.sidebar.button("🧪 Test Add Pending SQL"):
         from langchain_core.tools import Tool
         fake_tool = Tool(name="test_sql", description="Fake SQL tool", func=lambda x: "Fake result")
         future = concurrent.futures.Future()
-        _global_state.pending_approvals["SELECT 1 FROM DUAL;"] = {
+        runtime.pending_approvals["SELECT 1 FROM DUAL;"] = {
             "original_tool": fake_tool,
             "payload": {"sql": "SELECT 1 FROM DUAL;"},
             "future": future
@@ -557,18 +231,18 @@ def main():
 
     c1, c2 = st.sidebar.columns(2)
     if c1.button("▶️ Start Agent"):
-        _global_state.trace_logs.append(f"[{time.strftime('%H:%M:%S')}] 🚀 Starting MCP Agent…")
+        runtime.trace_logs.append(f"[{time.strftime('%H:%M:%S')}] 🚀 Starting MCP Agent…")
         with st.spinner("Starting MCP Agent..."):
-            start_agent_thread(auto_approve, conn_cfg)
-            start_log_stream()
+            start_agent_thread(auto_approve, conn_cfg, runtime)
+            start_log_stream(runtime)
             st.success("✅ Agent started")
-        # brief drain
+        # drain a bit
         t_end = time.time() + 1.0
         while time.time() < t_end:
             drained = False
             try:
-                while not _global_state.log_q.empty():
-                    _global_state.trace_logs.append(_safe_str(_global_state.log_q.get_nowait()))
+                while not runtime.log_q.empty():
+                    runtime.trace_logs.append(_safe_str(runtime.log_q.get_nowait()))
                     drained = True
             except queue.Empty:
                 pass
@@ -577,34 +251,34 @@ def main():
         rerun_throttled(0.5)
 
     if c2.button("🛑 Stop Agent"):
-        _global_state.stop_flag["stop"] = True
+        runtime.stop_flag["stop"] = True
         st.warning("Stopping agent...")
 
-    # ---------- Logs (CRASH-PROOF) ----------
+    # ---------- Logs ----------
     st.subheader("📜 Agent Logs (Live)")
     if st.button("🧹 Clear Logs"):
-        _global_state.trace_logs.clear()
+        runtime.trace_logs.clear()
 
     try:
-        while not _global_state.log_q.empty():
-            _global_state.trace_logs.append(_safe_str(_global_state.log_q.get_nowait()))
+        while not runtime.log_q.empty():
+            runtime.trace_logs.append(_safe_str(runtime.log_q.get_nowait()))
     except queue.Empty:
         pass
 
     logs_box = st.empty()
-    log_text_raw = "\n".join(_global_state.trace_logs[-1500:]) or "No logs yet..."
+    log_text_raw = "\n".join(runtime.trace_logs[-1500:]) or "No logs yet..."
     log_html = (
         "<div id='logsbox' style='background-color:#111;color:#EEE;padding:10px;"
         "border-radius:8px;height:300px;overflow-y:auto;"
         "font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Courier New\", monospace;"
         "font-size:13px;line-height:1.35;'>"
         + _safe_html_text(log_text_raw) +
-        f"</div><span id='logsmarker' data-n='{len(_global_state.trace_logs)}' style='display:none;'></span>"
+        f"</div><span id='logsmarker' data-n='{len(runtime.trace_logs)}' style='display:none;'></span>"
         "<script>(function(){"
         "  var el=document.getElementById('logsbox'); if(!el) return;"
         "  function tail(){"
         "    el.scrollTop = el.scrollHeight;"
-        "    el.scrollTop = el.scrollHeight - el.clientHeight + 1;"  # ensure bottom even if layout shifts
+        "    el.scrollTop = el.scrollHeight - el.clientHeight + 1;"
         "  }"
         "  tail();"
         "  requestAnimationFrame(tail);"
@@ -613,7 +287,7 @@ def main():
     )
     _render_html(logs_box, log_html, fallback_text=log_text_raw)
 
-    # ---------- Conversation (STABLE, NO FLICKER) ----------
+    # ---------- Conversation ----------
     st.markdown("#### 💬 Conversation")
     chat_ph = st.empty()
 
@@ -632,7 +306,7 @@ def main():
         bubbles = []
         for role, content in ss.chat_history:
             if role == "user":
-                safe = _md_to_html(str(content))  # escapes internally
+                safe = _md_to_html(str(content))
                 bubbles.append(
                     "<div style='background:#2a2a2a;color:#fff;padding:10px;border-radius:8px;margin-bottom:8px;'>"
                     "<b>👤 You:</b><br>" + safe + "</div>"
@@ -663,18 +337,14 @@ def main():
         )
         _render_html(chat_ph, html_block, fallback_text="(chat render fallback)")
 
-    # initial render
     render_chat(always=True)
 
-    # ---------- Pending SQL Approvals (readable monospace cards) ----------
-    pending_sqls = list(_global_state.pending_approvals.keys())
+    # ---------- Pending SQL Approvals ----------
+    pending_sqls = list(runtime.pending_approvals.keys())
     if pending_sqls:
         st.markdown("### 📝 Pending SQL Approvals")
-
         for sql in pending_sqls:
-            item = _global_state.pending_approvals[sql]
-
-            # Monospace, wrapped, high-contrast SQL card
+            item = runtime.pending_approvals[sql]
             sql_card_html = (
                 "<div style='border:1px solid #333; background:#0d0d0d; border-radius:10px; padding:12px; margin:8px 0;'>"
                 "<div style='color:#bbb; font-size:12px; margin-bottom:6px;'>SQL Query</div>"
@@ -688,20 +358,16 @@ def main():
 
             col1, col2 = st.columns(2)
             if col1.button("✅ Approve and Execute", key=f"approve_{hash(sql)}"):
-                _global_state.log_q.put(f"[DEBUG] Approving SQL: {sql}")
                 try:
                     item['future'].set_result({"approved": True})
                     st.success("✅ Approved. Execution will proceed.")
-                    _global_state.log_q.put(f"[DEBUG] Future approval set for {sql}")
                 except Exception as e:
-                    _global_state.log_q.put(f"[DEBUG] Approval exception: {e}")
                     st.error(f"❌ Error: {e}")
                 finally:
-                    _global_state.pending_approvals.pop(sql, None)
+                    runtime.pending_approvals.pop(sql, None)
                 rerun_throttled(0.5)
 
             if col2.button("❌ Deny", key=f"deny_{hash(sql)}"):
-                _global_state.log_q.put(f"[DEBUG] Denying SQL: {sql}")
                 try:
                     item['future'].set_result({"approved": False})
                 except Exception:
@@ -710,11 +376,10 @@ def main():
                     except Exception:
                         pass
                 finally:
-                    _global_state.pending_approvals.pop(sql, None)
+                    runtime.pending_approvals.pop(sql, None)
                 rerun_throttled(0.5)
     else:
-        st.info(f"No pending SQL approvals. Pending count: {len(_global_state.pending_approvals)}")
-
+        st.info(f"No pending SQL approvals. Pending count: {len(runtime.pending_approvals)}")
 
     # ---------- Input ----------
     status_ph = st.empty()
@@ -736,14 +401,13 @@ def main():
 
     if submitted:
         q = (user_query or "").strip()
-        agent_running_now = ("agent" in _global_state.threads) and _global_state.threads["agent"].is_alive()
-
+        agent_running_now = ("agent" in runtime.threads) and runtime.threads["agent"].is_alive()
         if not q:
             st.warning("Please enter a question.")
         elif not agent_running_now:
             st.error("Agent not running. Please start it first.")
         else:
-            _global_state.prompt_q.put(q)
+            runtime.prompt_q.put(q)
             ss.chat_history.append(("user", q))
             ss.pending_response = True
             _render_html(
@@ -751,17 +415,16 @@ def main():
                 "<div style='margin-bottom:6px;color:#9CDCFE;'>🤖 <em>Thinking…</em></div>",
                 fallback_text="Thinking…"
             )
-            ss._clear_chat_input = True
             rerun_throttled(0.5)
 
-    # ---------- Check for AI response (NO extra rerun here) ----------
+    # ---------- Pull AI response (no extra rerun) ----------
     if ss.pending_response:
         try:
-            reply = _global_state.response_q.get_nowait()
+            reply = runtime.response_q.get_nowait()
             ss.chat_history.append(("ai", reply))
             ss.pending_response = False
             status_ph.empty()
-            render_chat(always=True)  # update chat, no st.rerun() → no flicker
+            render_chat(always=True)
         except queue.Empty:
             pass
 
@@ -774,6 +437,5 @@ def main():
         pass
 
 
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
     main()
