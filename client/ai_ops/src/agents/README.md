@@ -103,3 +103,5 @@ conn -save demo_mcp_sys -savepwd sys/Oracle_123@localhost:1521/FREEPDB1 as sysdb
   export PYTHONPATH=/Users/aojah/Documents/GenAI-CoE/Agentic-Framework/source-code/agentic-ai-landing-zone-master/agentic-ai-landing-zone/client/ai_ops
 
   python3.13 -m streamlit run src/apps/db_operator_ui.py
+
+  export DBOP_UI_TOKEN="a-much-stronger-secret"

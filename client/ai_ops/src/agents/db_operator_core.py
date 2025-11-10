@@ -6,6 +6,7 @@ import time
 import concurrent.futures
 from dataclasses import dataclass
 import json as _json
+import uuid
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -17,7 +18,6 @@ from langchain.callbacks.base import BaseCallbackHandler
 from mcp import StdioServerParameters
 from langchain_mcp_adapters.tools import load_mcp_tools
 
-# Your project imports (LLM + tools + helpers)
 from src.prompt_engineering.topics.db_operator import promt_oracle_db_operator
 from src.tools.rag_agent import _rag_agent_service
 from src.tools.python_scratchpad import run_python
@@ -30,28 +30,29 @@ from src.llm.oci_genai import initialize_llm
 # RUNTIME (framework-agnostic)
 # ─────────────────────────────────────────────
 class AgentRuntime:
-    """Self-contained queues/flags for running the agent without UI coupling."""
+    """Queues/flags for running the agent; UI-agnostic."""
     def __init__(self):
         self.prompt_q = queue.Queue()
         self.response_q = queue.Queue()
         self.log_q = queue.Queue()
+        self.control_q = queue.Queue()   # set_history / clear_history
         self.stop_flag = {"stop": False}
         self.trace_logs = []
         self.threads = {}
-        # sql -> {"original_tool": tool, "payload": payload, "future": future}
+        # approval_id -> {"id","sql","original_tool","payload","future"}
         self.pending_approvals = {}
+        # generic toggles (e.g., force approvals during replay)
+        self.flags = {"force_auto_approve": False}
 
 
 # ─────────────────────────────────────────────
 # LOGGING CALLBACK
 # ─────────────────────────────────────────────
 class ReactLogHandler(BaseCallbackHandler):
-    """Streams LangChain events to a queue; no Streamlit dependency."""
     def __init__(self, log_q: queue.Queue):
         self.log_q = log_q
 
-    def _ts(self):
-        return time.strftime('%H:%M:%S')
+    def _ts(self): return time.strftime('%H:%M:%S')
 
     def _emit(self, emoji: str, prefix: str, msg):
         try:
@@ -82,21 +83,14 @@ class ReactLogHandler(BaseCallbackHandler):
     # callbacks
     def on_chain_start(self, serialized, inputs, **kwargs):
         self._emit("🔗", "Chain Start", {"name": self._name_from_serialized(serialized), "inputs": inputs})
-
-    def on_chain_end(self, outputs, **kwargs):
-        self._emit("✅", "Chain End", outputs)
-
-    def on_error(self, error, **kwargs):
-        self._emit("💥", "Error", str(error))
-
+    def on_chain_end(self, outputs, **kwargs): self._emit("✅", "Chain End", outputs)
+    def on_error(self, error, **kwargs): self._emit("💥", "Error", str(error))
     def on_llm_start(self, serialized, prompts, **kwargs):
         name = self._name_from_serialized(serialized)
         if isinstance(prompts, (list, tuple)):
-            for p in prompts:
-                self._emit("🧠", f"LLM Prompt ({name})", p)
+            for p in prompts: self._emit("🧠", f"LLM Prompt ({name})", p)
         else:
             self._emit("🧠", f"LLM Prompt ({name})", prompts)
-
     def on_llm_end(self, response, **kwargs):
         text = None
         try:
@@ -106,17 +100,11 @@ class ReactLogHandler(BaseCallbackHandler):
         except Exception:
             pass
         self._emit("💡", "LLM Response", text or "<no generations>")
-
     def on_tool_start(self, serialized, input_str, **kwargs):
         self._emit("🧩", f"Action: {self._name_from_serialized(serialized)}", input_str)
-
-    def on_tool_end(self, output, **kwargs):
-        self._emit("👁️", "Observation", output)
-
+    def on_tool_end(self, output, **kwargs): self._emit("👁️", "Observation", output)
     def on_agent_action(self, action, **kwargs):
-        log_text = getattr(action, "log", None)
-        self._emit("⚙️", "Agent Action", log_text or str(action))
-
+        self._emit("⚙️", "Agent Action", getattr(action, "log", None) or str(action))
     def on_agent_finish(self, finish, **kwargs):
         try:
             val = getattr(finish, "return_values", {}) or {}
@@ -160,15 +148,10 @@ class RunSQLInput(BaseModel):
     sqlcl: str = Field(default="sqlcl")
 
 def _tool_details_safe(tool):
-    """Return (name, description, args_schema_json|None) without throwing."""
-    try:
-        name = getattr(tool, "name", type(tool).__name__)
-    except Exception:
-        name = type(tool).__name__
-    try:
-        desc = (getattr(tool, "description", "") or "").strip()
-    except Exception:
-        desc = ""
+    try: name = getattr(tool, "name", type(tool).__name__)
+    except Exception: name = type(tool).__name__
+    try: desc = (getattr(tool, "description", "") or "").strip()
+    except Exception: desc = ""
     schema_json = None
     try:
         args_schema = getattr(tool, "args_schema", None)
@@ -198,41 +181,53 @@ def normalize_output(ai_response, history):
         history.append(AIMessage(content=msg["content"])); return msg["content"]
     return "<<no response>>"
 
+
+# ─────────────────────────────────────────────
+# Approval wrapper (respects replay flag)
+# ─────────────────────────────────────────────
 async def user_confirmed_tool(original_tool, auto_approve: bool, state: AgentRuntime):
     async def wrapper(*args, **kwargs):
         sql_query = kwargs.get("sql", args[0] if args else "select sysdate from dual")
         payload = {"sql": sql_query}
-        if not auto_approve:
-            state.log_q.put(f"[DEBUG] Queuing SQL for approval: {sql_query}")
-            future = concurrent.futures.Future()
-            state.pending_approvals[sql_query] = {
-                "original_tool": original_tool,
-                "payload": payload,
-                "future": future,
-            }
-            try:
-                decision = await asyncio.wait_for(asyncio.wrap_future(future), timeout=300.0)
-            except asyncio.TimeoutError:
-                state.pending_approvals.pop(sql_query, None)
-                return "⚠️ SQL approval timed out after 5 minutes. Execution denied."
-            except concurrent.futures.CancelledError:
-                return "⚠️ SQL execution denied by user."
 
-            approved = bool(decision is True or (isinstance(decision, dict) and decision.get("approved")))
-            if not approved:
-                raise RuntimeError("SQL execution denied by user.")
-
+        # Force-approve path (used by replay) OR regular auto-approve
+        if state.flags.get("force_auto_approve", False) or auto_approve:
             if hasattr(original_tool, "ainvoke"):
                 return await original_tool.ainvoke(payload)
             elif hasattr(original_tool, "invoke"):
                 return original_tool.invoke(payload)
             return original_tool.run(**payload)
-        else:
-            if hasattr(original_tool, "ainvoke"):
-                return await original_tool.ainvoke(payload)
-            elif hasattr(original_tool, "invoke"):
-                return original_tool.invoke(payload)
-            return original_tool.run(**payload)
+
+        # Interactive approval path
+        approval_id = f"{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"
+        state.log_q.put(f"[{time.strftime('%H:%M:%S')}] ⏳ Awaiting approval id={approval_id} sql={sql_query}")
+        future = concurrent.futures.Future()
+        state.pending_approvals[approval_id] = {
+            "id": approval_id,
+            "sql": sql_query,
+            "original_tool": original_tool,
+            "payload": payload,
+            "future": future,
+        }
+        try:
+            decision = await asyncio.wait_for(asyncio.wrap_future(future), timeout=300.0)
+        except asyncio.TimeoutError:
+            state.pending_approvals.pop(approval_id, None)
+            return "⚠️ SQL approval timed out after 5 minutes. Execution denied."
+        except concurrent.futures.CancelledError:
+            state.pending_approvals.pop(approval_id, None)
+            return "⚠️ SQL execution denied by user."
+
+        approved = bool(decision is True or (isinstance(decision, dict) and decision.get("approved")))
+        state.pending_approvals.pop(approval_id, None)
+        if not approved:
+            raise RuntimeError("SQL execution denied by user.")
+
+        if hasattr(original_tool, "ainvoke"):
+            return await original_tool.ainvoke(payload)
+        elif hasattr(original_tool, "invoke"):
+            return original_tool.invoke(payload)
+        return original_tool.run(**payload)
 
     return StructuredTool(
         name=original_tool.name,
@@ -243,7 +238,20 @@ async def user_confirmed_tool(original_tool, auto_approve: bool, state: AgentRun
 
 
 # ─────────────────────────────────────────────
-# AGENT LOOP + THREAD HELPERS (framework-agnostic)
+# CONTROL HELPERS (public API)
+# ─────────────────────────────────────────────
+def set_agent_history(state: AgentRuntime, chat_history_items: list[dict]):
+    state.control_q.put({"type": "set_history", "history": chat_history_items})
+
+def clear_agent_history(state: AgentRuntime):
+    state.control_q.put({"type": "clear_history"})
+
+def set_force_auto_approve(state: AgentRuntime, on: bool):
+    state.flags["force_auto_approve"] = bool(on)
+
+
+# ─────────────────────────────────────────────
+# AGENT LOOP + THREAD HELPERS
 # ─────────────────────────────────────────────
 async def agent_loop(auto_approve: bool, conn_cfg: ConnectionConfig, state: AgentRuntime):
     log = lambda m: state.log_q.put(f"[{time.strftime('%H:%M:%S')}] {m}")
@@ -283,7 +291,6 @@ async def agent_loop(auto_approve: bool, conn_cfg: ConnectionConfig, state: Agen
                 else:
                     log(f"🔴 [{name}] Connection failed.")
 
-            # Wrap SQL tools for approval path
             wrapped = []
             for t in all_tools:
                 if is_sql_tool(t):
@@ -292,8 +299,6 @@ async def agent_loop(auto_approve: bool, conn_cfg: ConnectionConfig, state: Agen
                     wrapped.append(t)
 
             tools_final = wrapped + [run_python, _rag_agent_service]
-
-            # Log the explicitly added tools
             for extra in [run_python, _rag_agent_service]:
                 name, desc, _schema = _tool_details_safe(extra)
                 log(f"🧩 Added built-in tool: {name} — {desc or '<no description>'}")
@@ -312,6 +317,32 @@ async def agent_loop(auto_approve: bool, conn_cfg: ConnectionConfig, state: Agen
             log("🚀 Agent loop started.")
 
             while not state.stop_flag["stop"]:
+                # control channel
+                try:
+                    while True:
+                        ctrl = state.control_q.get_nowait()
+                        if not isinstance(ctrl, dict):
+                            continue
+                        ctype = ctrl.get("type")
+                        if ctype == "clear_history":
+                            history.clear()
+                            log("🧽 History cleared via control channel.")
+                        elif ctype == "set_history":
+                            raw = ctrl.get("history") or []
+                            new_hist = []
+                            for item in raw:
+                                role = (item.get("role") or "").lower()
+                                content = item.get("content") or ""
+                                if role == "user":
+                                    new_hist.append(HumanMessage(content=content))
+                                elif role == "ai":
+                                    new_hist.append(AIMessage(content=content))
+                            history = new_hist
+                            log(f"📌 History replaced from checkpoint (len={len(history)}).")
+                except queue.Empty:
+                    pass
+
+                # user prompts
                 try:
                     prompt = state.prompt_q.get(timeout=0.5)
                     log(f"🟡 Received: {prompt}")
@@ -348,12 +379,10 @@ def start_agent_thread(auto_approve: bool, conn_cfg: ConnectionConfig, state: Ag
 
 
 def start_log_stream(state: AgentRuntime):
-    """Continuously drain log_q into trace_logs."""
     if "stream" in state.threads and state.threads["stream"].is_alive():
         return
 
     MAX_LOGS = 5000
-
     def pump():
         while not state.stop_flag["stop"]:
             try:
@@ -368,7 +397,6 @@ def start_log_stream(state: AgentRuntime):
                     del state.trace_logs[: len(state.trace_logs) - MAX_LOGS]
             except queue.Empty:
                 continue
-
     t = threading.Thread(target=pump, daemon=True)
     t.start()
     state.threads["stream"] = t
