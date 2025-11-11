@@ -15,7 +15,6 @@ import json
 import queue
 import shutil
 import tempfile
-import concurrent.futures
 from datetime import datetime
 
 import streamlit as st
@@ -88,20 +87,27 @@ def _render_html(container, html_str: str, fallback_text: str = ""):
         container.warning(f"Render fallback (invalid HTML): {e}")
         container.code(_safe_str(fallback_text or html_str), language="text")
 
-def _hash_chat(chat_history: list[tuple[str, str]]) -> str:
-    import hashlib
-    h = hashlib.sha256()
-    for role, content in chat_history:
-        h.update(role.encode("utf-8", errors="ignore")); h.update(b"\x00")
-        h.update(str(content).encode("utf-8", errors="ignore")); h.update(b"\x00")
-    return h.hexdigest()
-
-def rerun_throttled(min_interval_sec: float = 1.0, key: str = "_last_rerun_ts"):
-    now = time.time()
-    last = st.session_state.get(key, 0.0)
-    if now - last >= min_interval_sec:
-        st.session_state[key] = now
-        st.rerun()
+def _render_tail_box(container, box_id: str, inner_html: str, height_px: int = 300, bg="#111", fg="#EEE"):
+    """
+    Scrollable box that always tails to bottom on load and on DOM mutations.
+    """
+    box_style = (
+        f"background-color:{bg};color:{fg};padding:10px;border-radius:8px;"
+        f"height:{height_px}px;overflow-y:auto;"
+        'font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;'
+        "font-size:13px;line-height:1.35;"
+    )
+    html_block = (
+        f'<div id="{box_id}" style="{box_style}">{inner_html}</div>'
+        "<script>(function(){"
+        f'  var el=document.getElementById("{box_id}"); if(!el) return;'
+        "  function tail(){ try{ el.scrollTop = el.scrollHeight; }catch(e){} }"
+        "  tail(); requestAnimationFrame(tail); setTimeout(tail,0); setTimeout(tail,120);"
+        "  try { var obs=new MutationObserver(function(){ tail(); });"
+        "        obs.observe(el,{childList:true,subtree:true,characterData:true}); } catch(e) {}"
+        "})();</script>"
+    )
+    _render_html(container, html_block, fallback_text=_safe_str(inner_html))
 
 def _clean_ai_text(text: str) -> str:
     if not text: return ""
@@ -129,6 +135,13 @@ def _md_to_html(md_text: str) -> str:
     esc = re.sub(r"(?m)^- (.+)$", r"• \1", esc)
     esc = esc.replace("\n", "<br>")
     return esc
+
+def rerun_throttled(min_interval_sec: float = 1.0, key: str = "_last_rerun_ts"):
+    now = time.time()
+    last = st.session_state.get(key, 0.0)
+    if now - last >= min_interval_sec:
+        st.session_state[key] = now
+        st.rerun()
 
 
 # ─────────────────────────────────────────────
@@ -198,21 +211,18 @@ def main():
     # ---------- UI-local session ----------
     ss = st.session_state
     ss.setdefault("busy", False)
-    ss.setdefault("suppress_refresh", False)
     ss.setdefault("chat_history", [])         # list[("user"|"ai", content)]
     ss.setdefault("chat_input", "")
     ss.setdefault("pending_response", False)
-    ss.setdefault("_chat_hash", None)
-    ss.setdefault("_chat_rendered_once", False)
 
-    # 🆕 Replay state machine (non-blocking)
+    # Replay state machine (non-blocking)
     ss.setdefault("replay", {
         "active": False,      # currently replaying?
         "prompts": [],        # list of user prompts to replay
         "i": 0,               # next prompt index
-        "seed": True,         # whether to seed memory with snapshot
         "autoapprove": True,  # force auto-approve during replay
-        "name": None,         # checkpoint name (for status)
+        "name": None,         # checkpoint name
+        "clear_before": False # clear chat before starting replay
     })
 
     # checkpoints: name -> {created_at, notes, script: [user prompts], snapshot: [{"role","content"}]}
@@ -275,7 +285,7 @@ def main():
         )
 
     # ─────────────────────────────────────────
-    # 🧷 Checkpoints (Durable + Non-blocking Replay)
+    # 🧷 Checkpoints — Separate RESTORE and REPLAY
     # ─────────────────────────────────────────
     with st.sidebar.expander("🧷 Checkpoints", expanded=True):
         default_name = f"cp-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -295,23 +305,57 @@ def main():
             _save_checkpoints_to_disk(ss.checkpoints)
             ss.last_checkpoint = cp_name
             st.sidebar.success(f"Saved '{cp_name}'")
-            st.rerun()
+            rerun_throttled(0.2)
 
         if col_cp2.button("Clear all", use_container_width=True):
             ss.checkpoints.clear()
             ss.last_checkpoint = None
             _save_checkpoints_to_disk(ss.checkpoints)
             st.sidebar.warning("All checkpoints cleared.")
-            st.rerun()
+            rerun_throttled(0.2)
 
         if ss.checkpoints:
             names = sorted(ss.checkpoints.keys(), key=lambda n: ss.checkpoints[n]["created_at"], reverse=True)
             selected = st.selectbox("Select checkpoint", names, index=0 if names else None)
 
-            st.markdown("**Restore & Replay Options**")
-            seed_memory = st.checkbox("Also seed memory from snapshot (preload turns) before replay", value=True)
-            approve_replay = st.checkbox("Auto-approve during replay", value=False,
-                                         help="If OFF, approvals will be required and buttons will be interactive during replay.")
+            with st.container():
+                st.markdown("**Restore Options**")
+                seed_memory = st.checkbox(
+                    "Seed agent memory from snapshot (preload Q/A into agent state)",
+                    value=True,
+                    help="Restores the conversation in the panel and seeds the agent's memory. No automatic execution."
+                )
+                if st.button("Restore (show prior Q/A only)", use_container_width=True):
+                    meta = ss.checkpoints[selected]
+                    snapshot = meta.get("snapshot", [])
+                    # Show prior Q/A in the conversation panel
+                    ss.chat_history = [(d["role"], d["content"]) for d in snapshot if "role" in d and "content" in d]
+                    # Seed agent memory (optional)
+                    clear_agent_history(runtime)
+                    if seed_memory and snapshot:
+                        set_agent_history(runtime, snapshot)
+                    ss.last_checkpoint = selected
+                    st.sidebar.success(f"Restored '{selected}' (no execution).")
+                    rerun_throttled(0.2)
+
+            st.markdown("---")
+
+            st.markdown("**Replay Options**")
+            approve_replay = st.checkbox(
+                "Auto-approve during replay",
+                value=False,
+                help="If OFF, approvals will be required and buttons will be interactive during replay."
+            )
+            clear_before_replay = st.checkbox(
+                "Clear chat before replay",
+                value=True,
+                help="If ON, removes the current chat panel before re-running the saved script."
+            )
+            ensure_running = st.checkbox(
+                "Ensure agent is started",
+                value=True,
+                help="Start the agent automatically if not already running."
+            )
 
             cpr1, cpr2, cpr3 = st.columns([1,1,1])
 
@@ -325,36 +369,33 @@ def main():
                     f"Snapshot turns: {len(meta.get('snapshot', []))}"
                 )
 
-            if cpr2.button("Restore & Replay", use_container_width=True):
-                # Ensure agent is running
-                if not (("agent" in runtime.threads) and runtime.threads["agent"].is_alive()):
+            if cpr2.button("Start Replay", use_container_width=True):
+                # Start the agent if needed
+                if ensure_running and not (("agent" in runtime.threads) and runtime.threads["agent"].is_alive()):
                     start_agent_thread(auto_approve, conn_cfg, runtime)
                     start_log_stream(runtime)
                     time.sleep(0.5)
 
                 meta = ss.checkpoints[selected]
                 script = list(meta.get("script", []))
-                snapshot = meta.get("snapshot", [])
 
-                # Clear UI & agent, then optionally seed memory
-                ss.chat_history = []
-                clear_agent_history(runtime)
-                if seed_memory and snapshot:
-                    set_agent_history(runtime, snapshot)
+                # Clear chat panel if requested
+                if clear_before_replay:
+                    ss.chat_history = []
 
-                # Initialize replay state (non-blocking)
+                # Initialize replay state (non-blocking). No seeding: Replay re-executes prompts.
                 ss.replay = {
                     "active": True,
                     "prompts": script,
                     "i": 0,
-                    "seed": bool(seed_memory),
                     "autoapprove": bool(approve_replay),
                     "name": selected,
+                    "clear_before": bool(clear_before_replay),
                 }
                 set_force_auto_approve(runtime, bool(approve_replay))
                 ss.last_checkpoint = selected
-                st.sidebar.success(f"Restore started: '{selected}'")
-                st.rerun()
+                st.sidebar.success(f"Replay started: '{selected}'")
+                rerun_throttled(0.2)
 
             if cpr3.button("Delete", use_container_width=True):
                 ss.checkpoints.pop(selected, None)
@@ -362,7 +403,7 @@ def main():
                     ss.last_checkpoint = None
                 _save_checkpoints_to_disk(ss.checkpoints)
                 st.sidebar.warning(f"Deleted '{selected}'")
-                st.rerun()
+                rerun_throttled(0.2)
         else:
             st.info("No checkpoints yet.")
 
@@ -412,7 +453,7 @@ def main():
         runtime.stop_flag["stop"] = True
         st.warning("Stopping agent...")
 
-    # ---------- Logs ----------
+    # ---------- Logs (auto-tail) ----------
     st.subheader("📜 Agent Logs (Live)")
     if st.button("🧹 Clear Logs"):
         runtime.trace_logs.clear()
@@ -424,50 +465,43 @@ def main():
         pass
 
     logs_box = st.empty()
-    log_text_raw = "\n".join(runtime.trace_logs[-1500:]) or "No logs yet..."
-    log_html = (
-        "<div id='logsbox' style='background-color:#111;color:#EEE;padding:10px;"
-        "border-radius:8px;height:300px;overflow-y:auto;"
-        "font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Courier New\", monospace;"
-        "font-size:13px;line-height:1.35;'>"
-        + _safe_html_text(log_text_raw) +
-        f"</div><span id='logsmarker' data-n='{len(runtime.trace_logs)}' style='display:none;'></span>"
-        "<script>(function(){"
-        "  var el=document.getElementById('logsbox'); if(!el) return;"
-        "  function tail(){ el.scrollTop = el.scrollHeight; el.scrollTop = el.scrollHeight - el.clientHeight + 1; }"
-        "  tail(); requestAnimationFrame(tail); setTimeout(tail,0);"
-        "})();</script>"
+    log_text_raw = "\n".join(runtime.trace_logs[-1500:]) if runtime.trace_logs else "No logs yet..."
+    _render_tail_box(
+        container=logs_box,
+        box_id="logsbox",
+        inner_html=_safe_html_text(log_text_raw),
+        height_px=300,
+        bg="#111",
+        fg="#EEE",
     )
-    _render_html(logs_box, log_html, fallback_text=log_text_raw)
 
-    # ---------- Conversation ----------
+    # ---------- Conversation (auto-tail) ----------
     st.markdown("#### 💬 Conversation")
     chat_ph = st.empty()
-
-    def _md_to_html_local(txt: str) -> str:
-        cleaned = _clean_ai_text(str(txt))
-        return _md_to_html(cleaned)
-
     bubbles = []
     for role, content in ss.chat_history:
         if role == "user":
-            safe = _md_to_html(str(content))
+            safe_user = _md_to_html(str(content))
             bubbles.append(
                 "<div style='background:#2a2a2a;color:#fff;padding:10px;border-radius:8px;margin-bottom:8px;'>"
-                "<b>👤 You:</b><br>" + safe + "</div>"
+                "<b>👤 You:</b><br>" + safe_user + "</div>"
             )
         else:
-            safe = _md_to_html_local(content)
+            cleaned = _clean_ai_text(str(content))
+            safe_ai = _md_to_html(cleaned)
             bubbles.append(
                 "<div style='background:#1e1e1e;color:#9CDCFE;padding:10px;border-radius:8px;margin-bottom:8px;'>"
-                "<b>🤖 AI:</b><br>" + safe + "</div>"
+                "<b>🤖 AI:</b><br>" + safe_ai + "</div>"
             )
-    html_block = (
-        "<div id='chatbox' style='background:#111;color:#EEE;padding:10px;border-radius:8px;height:300px;overflow-y:auto;'>"
-        + ("".join(bubbles) if bubbles else "<i>No conversation yet...</i>")
-        + "</div>"
+    inner_chat = "".join(bubbles) if bubbles else "<i>No conversation yet...</i>"
+    _render_tail_box(
+        container=chat_ph,
+        box_id="chatbox",
+        inner_html=inner_chat,
+        height_px=300,
+        bg="#111",
+        fg="#EEE",
     )
-    _render_html(chat_ph, html_block, fallback_text="(chat render fallback)")
 
     # ---------- Pending SQL Approvals (approval_id keyed) ----------
     pending_items = list(runtime.pending_approvals.values())
@@ -543,7 +577,7 @@ def main():
             _render_html(status_ph, "<div style='margin-bottom:6px;color:#9CDCFE;'>🤖 <em>Thinking…</em></div>", "Thinking…")
             rerun_throttled(0.2)
 
-    # ---------- Pull AI response (no blocking) ----------
+    # Pull AI response without blocking
     if ss.pending_response:
         try:
             reply = runtime.response_q.get_nowait()
@@ -554,33 +588,28 @@ def main():
             pass
 
     # ---------- 🧠 REPLAY DRIVER (non-blocking) ----------
-    # Advances one step per rerun; pauses automatically when approvals are pending or when waiting for model
+    # Advances one step per rerun; pauses on approvals or while waiting for model
     if ss.replay.get("active"):
-        # If we just got a model reply, advance to next prompt
         if not ss.pending_response and not runtime.pending_approvals:
             prompts = ss.replay["prompts"]
             i = ss.replay["i"]
             total = len(prompts)
 
-            # Finished?
             if i >= total:
-                set_force_auto_approve(runtime, False)  # back to normal mode
+                set_force_auto_approve(runtime, False)  # back to normal
                 st.sidebar.success(f"Replay complete: '{ss.replay.get('name')}'")
                 ss.replay["active"] = False
                 rerun_throttled(0.2)
             else:
-                # Push next prompt
                 next_prompt = prompts[i]
                 ss.chat_history.append(("user", next_prompt))
                 runtime.prompt_q.put(next_prompt)
                 ss.pending_response = True
                 ss.replay["i"] = i + 1
-                # Progress indicator in sidebar
                 pct = (i + 1) / max(1, total)
                 st.sidebar.progress(pct, text=f"Replaying {i+1}/{total}: {ss.replay.get('name')}")
                 rerun_throttled(0.2)
         else:
-            # We are either waiting on model or waiting for approval; keep a small status note
             total = len(ss.replay["prompts"])
             i = ss.replay["i"]
             if runtime.pending_approvals:
