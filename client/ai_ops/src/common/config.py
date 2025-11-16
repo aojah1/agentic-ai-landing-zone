@@ -57,5 +57,11 @@ MCP_SSE_HOST_DBTOOLS=os.getenv("MCP_SSE_HOST_DBTOOLS","0.0.0.0")
 MCP_SSE_PORT_DBTOOLS=os.getenv("MCP_SSE_PORT_DBTOOLS","8002")
 
 
+# ────────────────────────────────────────────────────────────────
+# Configure HTTP Server for Visualization 
+# ────────────────────────────────────────────────────────────────
+DBOP_PUBLIC_BASE_URL = os.getenv("DBOP_PUBLIC_BASE_URL")
+
+
 
 

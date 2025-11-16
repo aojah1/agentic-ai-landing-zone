@@ -33,7 +33,7 @@ from src.agents.db_operator_core import (
 # ─────────────────────────────────────────────
 # SIMPLE TOKEN AUTH
 # ─────────────────────────────────────────────
-HARD_TOKEN = os.getenv("DBOP_UI_TOKEN", "dbop-ui-secret-123")
+HARD_TOKEN = os.getenv("DBOP_UI_TOKEN", "anup123")
 
 def _auth_section() -> bool:
     ss = st.session_state
@@ -246,7 +246,7 @@ def main():
     agent_running = ("agent" in runtime.threads) and runtime.threads["agent"].is_alive()
     st.sidebar.markdown(f"**Status:** {'🟢 Running' if agent_running else '🔴 Stopped'}")
 
-    with st.sidebar.expander("MCP Connections", expanded=True):
+    with st.sidebar.expander("MCP Connections", expanded=False):
         def _to_int(v, fallback: int):
             try: return int(v)
             except Exception: return int(fallback)
@@ -287,7 +287,7 @@ def main():
     # ─────────────────────────────────────────
     # 🧷 Checkpoints — Separate RESTORE and REPLAY
     # ─────────────────────────────────────────
-    with st.sidebar.expander("🧷 Checkpoints", expanded=True):
+    with st.sidebar.expander("🧷 Checkpoints", expanded=False):
         default_name = f"cp-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         cp_name = st.text_input("Checkpoint name", value=default_name, help="Unique name")
         cp_notes = st.text_area("Notes (optional)", value="", height=60)
@@ -411,14 +411,12 @@ def main():
         _, folder, path = _fs_root_and_path()
         st.caption(f"Disk location: `{path}`")
 
-    # ---------- Smart auto-refresh (kept ON when needed) ----------
+        # ---------- Live auto-refresh (manual only) ----------
     try:
-        need_autorefresh = bool(
-            runtime.pending_approvals or ss.pending_response or ss.get("replay", {}).get("active")
-        )
+        # Default OFF; user can opt in from the sidebar if they really want polling
         live_refresh = st.sidebar.toggle(
             "Live refresh logs",
-            value=need_autorefresh,
+            value=False,
             help="When ON, page re-runs every ~4 seconds to pull new logs/approvals."
         )
         if live_refresh:
@@ -426,6 +424,7 @@ def main():
             st_autorefresh(interval=4000, key="live_log_refresh")
     except Exception:
         pass
+
 
     # ---------- Start/Stop ----------
     c1, c2 = st.sidebar.columns(2)
@@ -475,9 +474,12 @@ def main():
         fg="#EEE",
     )
 
-    # ---------- Conversation (auto-tail) ----------
+    # ---------- Conversation (auto-expanding, ChatGPT-style) ----------
     st.markdown("#### 💬 Conversation")
-    chat_ph = st.empty()
+
+    # Use a normal container so the chat can grow with the page instead of a fixed-height box
+    chat_container = st.container()
+
     bubbles = []
     for role, content in ss.chat_history:
         if role == "user":
@@ -493,15 +495,18 @@ def main():
                 "<div style='background:#1e1e1e;color:#9CDCFE;padding:10px;border-radius:8px;margin-bottom:8px;'>"
                 "<b>🤖 AI:</b><br>" + safe_ai + "</div>"
             )
+
     inner_chat = "".join(bubbles) if bubbles else "<i>No conversation yet...</i>"
-    _render_tail_box(
-        container=chat_ph,
-        box_id="chatbox",
-        inner_html=inner_chat,
-        height_px=300,
-        bg="#111",
-        fg="#EEE",
+
+    # Wrap in a flex column so it feels like a chat thread, but no fixed height / scroll
+    html_chat = (
+        "<div style='display:flex;flex-direction:column;gap:8px;max-width:900px;'>"
+        f"{inner_chat}"
+        "</div>"
     )
+
+    _render_html(chat_container, html_chat, fallback_text=_safe_str(inner_chat))
+
 
     # ---------- Pending SQL Approvals (approval_id keyed) ----------
     pending_items = list(runtime.pending_approvals.values())

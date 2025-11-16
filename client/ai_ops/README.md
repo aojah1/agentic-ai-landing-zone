@@ -22,6 +22,18 @@ After you create a project and a virtual environment, install the latest version
     
     python3.13 -m pip install -r requirements.txt
 
+### Note: If your linux machine has node version < 18.0, follow the instructions below
+>
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+    . ~/.nvm/nvm.sh
+    nvm install --lts
+    nvm use --lts
+    node -v
+    rm -rf ~/.npm/_npx ## remove any old references
+
+### For SQL CL MCP Server to work, please install Java 17 or higher
+
+
 ### Configuring your .env (config) file
 > Rename the /config/sample_.env to /config/.env
 > 
