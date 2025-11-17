@@ -84,6 +84,8 @@ def run_python(code: str) -> dict:
     }
 
     def _build_file_metadata():
+        """Builds files/file_urls/file_links from created_files."""
+        # Deduplicate + stable order
         files_list = sorted({p.resolve() for p in created_files})
         file_paths = [str(p) for p in files_list]
         file_urls = []
@@ -111,6 +113,7 @@ def run_python(code: str) -> dict:
             "result": ns.get("result"),
             "stdout": html.escape(out.getvalue()),
             "stderr": html.escape(err.getvalue()),
+            # New fields (non-breaking)
             "files": file_paths,
             "file_urls": file_urls,
             "file_links": file_links,
@@ -123,6 +126,7 @@ def run_python(code: str) -> dict:
             "error": html.escape(traceback.format_exc()),
             "stdout": html.escape(out.getvalue()),
             "stderr": html.escape(err.getvalue()),
+            # Still include file metadata in error case if anything was written
             "files": file_paths,
             "file_urls": file_urls,
             "file_links": file_links,

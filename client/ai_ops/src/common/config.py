@@ -62,6 +62,14 @@ MCP_SSE_PORT_DBTOOLS=os.getenv("MCP_SSE_PORT_DBTOOLS","8002")
 # ────────────────────────────────────────────────────────────────
 DBOP_PUBLIC_BASE_URL = os.getenv("DBOP_PUBLIC_BASE_URL")
 
+# 🔐 UI auth token for DB Operator
+HARD_TOKEN = os.getenv("HARD_TOKEN")
+
+if not HARD_TOKEN:
+    # Fail fast if you want to force a token
+    # or comment this out if you prefer a default
+    raise RuntimeError("HARD_TOKEN is not set. Please set it in config/.env")
+
 
 
 

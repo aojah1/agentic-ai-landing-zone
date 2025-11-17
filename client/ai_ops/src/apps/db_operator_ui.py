@@ -16,7 +16,12 @@ import queue
 import shutil
 import tempfile
 from datetime import datetime
-
+from src.common.config import (
+    HARD_TOKEN,
+    COMPARTMENT_ID,
+    ENDPOINT,
+    MODEL_ID,
+)
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -29,11 +34,6 @@ from src.agents.db_operator_core import (
     clear_agent_history,
     set_force_auto_approve,
 )
-
-# ─────────────────────────────────────────────
-# SIMPLE TOKEN AUTH
-# ─────────────────────────────────────────────
-HARD_TOKEN = os.getenv("DBOP_UI_TOKEN", "anup123")
 
 def _auth_section() -> bool:
     ss = st.session_state
@@ -54,6 +54,7 @@ def _auth_section() -> bool:
             st.rerun()
         return True
     token = st.sidebar.text_input("Access token", type="password", placeholder="Enter token")
+    
     if st.sidebar.button("Unlock"):
         if (token or "").strip() == HARD_TOKEN:
             ss.authed = True
@@ -235,6 +236,8 @@ def main():
         ss.checkpoints_loaded = True
 
     # ---------- Core runtime ----------
+    # Do NOT eagerly initialize the runtime with stale env values.
+    # Just ensure a placeholder for later.
     if "runtime" not in ss:
         ss.runtime = AgentRuntime()
     runtime = ss.runtime
@@ -245,6 +248,35 @@ def main():
 
     agent_running = ("agent" in runtime.threads) and runtime.threads["agent"].is_alive()
     st.sidebar.markdown(f"**Status:** {'🟢 Running' if agent_running else '🔴 Stopped'}")
+
+    # ---------- Agent LLM / OCI GenAI Settings ----------
+    with st.sidebar.expander("🤖 Agent LLM Settings (OCI GenAI)", expanded=False):
+        # Initialize in session_state once, using env or config defaults
+        if "oci_compartment" not in ss:
+            ss.oci_compartment = COMPARTMENT_ID
+        if "oci_endpoint" not in ss:
+            ss.oci_endpoint = ENDPOINT
+        if "oci_model_id" not in ss:
+            ss.oci_model_id = MODEL_ID
+
+        ss.oci_compartment = st.text_input(
+            "OCI Compartment OCID",
+            value=ss.oci_compartment,
+            help="Compartment where the GenAI endpoint is authorized."
+        )
+        ss.oci_endpoint = st.text_input(
+            "GenAI Endpoint",
+            value=ss.oci_endpoint,
+            help="e.g. https://inference.generativeai.us-chicago-1.oci.oraclecloud.com"
+        )
+        ss.oci_model_id = st.text_input(
+            "GenAI Model ID",
+            value=ss.oci_model_id,
+            help="e.g. xai.grok-3"
+        )
+
+        st.caption("These values will be applied when you start the MCP Agent.")
+
 
     with st.sidebar.expander("MCP Connections", expanded=False):
         def _to_int(v, fallback: int):
@@ -429,11 +461,31 @@ def main():
     # ---------- Start/Stop ----------
     c1, c2 = st.sidebar.columns(2)
     if c1.button("▶️ Start Agent"):
+        # 1) Apply latest OCI LLM settings to environment
+        if "oci_compartment" in ss:
+            os.environ["OCI_COMPARTMENT_ID"] = ss.oci_compartment.strip()
+        if "oci_endpoint" in ss:
+            os.environ["OCI_GENAI_ENDPOINT"] = ss.oci_endpoint.strip()
+        if "oci_model_id" in ss:
+            os.environ["OCI_GENAI_MODEL_ID"] = ss.oci_model_id.strip()
+
+        # 2) Kill old runtime/threads if any
+        try:
+            if hasattr(ss.runtime, "stop_flag"):
+                ss.runtime.stop_flag["stop"] = True
+        except Exception:
+            pass
+
+        # 3) Recreate runtime so it picks up new env when it calls initialize_llm()
+        ss.runtime = AgentRuntime()
+        runtime = ss.runtime
+
         runtime.trace_logs.append(f"[{time.strftime('%H:%M:%S')}] 🚀 Starting MCP Agent…")
         with st.spinner("Starting MCP Agent..."):
             start_agent_thread(auto_approve, conn_cfg, runtime)
             start_log_stream(runtime)
             st.success("✅ Agent started")
+
         # drain a bit
         t_end = time.time() + 1.0
         while time.time() < t_end:
@@ -447,6 +499,8 @@ def main():
             if not drained:
                 time.sleep(0.05)
         rerun_throttled(0.5)
+
+
 
     if c2.button("🛑 Stop Agent"):
         runtime.stop_flag["stop"] = True
