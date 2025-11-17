@@ -206,8 +206,13 @@ The DB Operator Agent follows a Solo Agent Architecture pattern, with multiple t
 
 ### Build/Deploy an DB Operator Agent
 
+### Console based agent
+
 > python3.13 -m src.agents.db_operator
-> 
+
+### UI based agent
+> python3.13 -m streamlit run src/apps/db_operator_ui.py
+
 ### Test DB Operator Agent
 
 ====================================
